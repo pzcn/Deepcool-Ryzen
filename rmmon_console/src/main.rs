@@ -27,7 +27,13 @@ fn fmt3(v: i32) -> String {
 }
 
 fn main() -> Result<()> {
-    let lib = unsafe { Library::new("rmmon_wrapper.dll") }
+    let exe_path = std::env::current_exe()
+        .map_err(|e| anyhow!("locate exe failed: {e}"))?;
+    let exe_dir = exe_path
+        .parent()
+        .ok_or_else(|| anyhow!("locate exe directory failed"))?;
+    let dll_path = exe_dir.join("rmmon_wrapper.dll");
+    let lib = unsafe { Library::new(&dll_path) }
         .map_err(|e| anyhow!("load dll failed: {e}"))?;
 
     let rm_init: Symbol<RmInit> = unsafe { lib.get(b"rm_init\0") }?;
