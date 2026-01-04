@@ -1,0 +1,22 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-rust-console:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build rmmon_console
+        working-directory: rmmon_console
+        run: cargo build --release
+      - name: Upload rmmon_console artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rmmon_console-windows
+          path: rmmon_console/target/release/rmmon_console.exe
