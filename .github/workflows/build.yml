@@ -1,0 +1,30 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      CONFIGURATION: Release
+      PLATFORM: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build solution
+        run: msbuild AMDRyzenMasterMonitoringSampleApp.sln /m /p:Configuration=${{ env.CONFIGURATION }} /p:Platform=${{ env.PLATFORM }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AMDRyzenMasterMonitoringSampleApp-${{ env.CONFIGURATION }}-${{ env.PLATFORM }}
+          path: |
+            bin/*.exe
+            bin/*.pdb
+          if-no-files-found: error
