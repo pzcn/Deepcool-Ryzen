@@ -2,6 +2,9 @@ use std::env;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 
+#[cfg(not(windows))]
+mod ld_device;
+
 #[cfg(windows)]
 extern "C" {
     fn run_sample_app(argc: c_int, argv: *mut *mut c_char) -> c_int;
@@ -23,6 +26,15 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("This application only supports Windows targets.");
+    let args: Vec<String> = env::args().collect();
+    if args.iter().any(|arg| arg == "--ld-send") {
+        if let Err(message) = ld_device::run(&args) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    eprintln!("This application only supports Windows targets unless using --ld-send.");
     std::process::exit(1);
 }
