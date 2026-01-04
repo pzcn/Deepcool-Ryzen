@@ -1142,7 +1142,7 @@ void Process_program_options(const int argc, char* const argv[])
 	return;
 }
 
-int main(int argc, CHAR **argv)
+extern "C" int run_sample_app(int argc, CHAR **argv)
 {
 	//Check if application running with admin privileged or not
 	if (!IsUserAnAdmin())
