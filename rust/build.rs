@@ -26,4 +26,7 @@ fn main() {
         .compile("ryzenmaster_wrapper");
 
     println!("cargo:rustc-link-lib=Netapi32");
+    println!("cargo:rustc-link-lib=User32");
+    println!("cargo:rustc-link-lib=Shell32");
+    println!("cargo:rustc-link-lib=Advapi32");
 }
