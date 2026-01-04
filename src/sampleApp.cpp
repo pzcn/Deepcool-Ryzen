@@ -25,6 +25,7 @@
 #include <regex>
 
 #include "Utility.hpp"
+#include "RustBridge.hpp"
 #pragma comment(lib, "PowrProf.lib")
 
 #define MAX_LENGTH 50
@@ -1158,6 +1159,8 @@ int main(int argc, CHAR **argv)
 	//Check if we have AMD processor
 	if (!Authentic_AMD())
 		ShowError(_T("No AMD Processor is found!"), FALSE, 1);
+
+	PrintRustHidData();
 
 	//Check if driver is installed or not
 	if (QueryDrvService() < 0)

@@ -19,9 +19,11 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="inc\RustBridge.hpp" />
     <ClInclude Include="inc\Utility.hpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\RustBridge.cpp" />
     <ClCompile Include="src\sampleApp.cpp" />
     <ClCompile Include="src\Utility.cpp" />
   </ItemGroup>
