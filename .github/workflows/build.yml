@@ -10,6 +10,7 @@ jobs:
     env:
       CONFIGURATION: Release
       PLATFORM: x64
+      AMDRMMONITORSDKPATH: ${{ vars.AMDRMMONITORSDKPATH }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,11 +18,40 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Check AMD Ryzen Master SDK headers
+        id: sdk
+        shell: pwsh
+        run: |
+          $sdkPath = $env:AMDRMMONITORSDKPATH
+          if (-not $sdkPath) {
+            Write-Output "AMDRMMONITORSDKPATH is not set."
+            "build_enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+
+          $includePath = Join-Path $sdkPath "include"
+          $cpuHeader = Join-Path $includePath "ICPUEx.h"
+          $globalHeader = Join-Path $includePath "GlobalDef.h"
+
+          if ((Test-Path $cpuHeader) -and (Test-Path $globalHeader)) {
+            Write-Output "Found SDK headers in $includePath."
+            "build_enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Output "Missing SDK headers in $includePath."
+            "build_enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
       - name: Build solution
+        if: steps.sdk.outputs.build_enabled == 'true'
         run: msbuild AMDRyzenMasterMonitoringSampleApp.sln /m /p:Configuration=${{ env.CONFIGURATION }} /p:Platform=${{ env.PLATFORM }}
+
+      - name: Skip build (SDK headers missing)
+        if: steps.sdk.outputs.build_enabled != 'true'
+        run: echo "Skipping build because AMDRMMONITORSDKPATH is not set or missing headers."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
+        if: steps.sdk.outputs.build_enabled == 'true'
         with:
           name: AMDRyzenMasterMonitoringSampleApp-${{ env.CONFIGURATION }}-${{ env.PLATFORM }}
           path: |
