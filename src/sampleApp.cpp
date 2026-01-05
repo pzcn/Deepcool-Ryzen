@@ -6,28 +6,30 @@
 #pragma once
 #include <windows.h>
 #include <Shlobj.h>
-#include <iostream>
-#include <VersionHelpers.h>
 #include <intrin.h>
-#include <fstream>
 #include <chrono>
-#include <ctime>
-#include <iomanip>
-#include <sstream>
 #include <thread>
-#include <filesystem>
-#include <powrprof.h>
-#include <guiddef.h>
+#include <setupapi.h>
+#include <hidsdi.h>
+#include <array>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include "ICPUEx.h"
 #include "IPlatform.h"
 #include "IDeviceManager.h"
 #include "IBIOSEx.h"
-#include <regex>
 
 #include "Utility.hpp"
-#pragma comment(lib, "PowrProf.lib")
 
-#define MAX_LENGTH 50
+#pragma comment(lib, "Setupapi.lib")
+#pragma comment(lib, "Hid.lib")
+
+constexpr USHORT kFixedVid = 0x3633;
+constexpr USHORT kFixedPid = 0x000A;
+
 typedef IPlatform& (__stdcall* GetPlatformFunc)();
 
 enum CPU_PackageType
@@ -48,53 +50,73 @@ enum CPU_PackageType
 	cptUnknown = 0xF
 };
 
-TCHAR PrintErr[][63] = { _T("Failure"),_T("Success") ,_T("Invalid value"),_T("Method is not implemented by the BIOS"),_T("Cores are already parked. First Enable all the cores"), _T("Unsupported Function") };
-
-
-inline void printFunc(LPCTSTR func, BOOL bCore, int i = 0)
+struct MonitoringContext
 {
-	if (!bCore)
+	HMODULE hPlatform = nullptr;
+	IPlatform* platform = nullptr;
+	ICPUEx* cpu = nullptr;
+	IBIOSEx* bios = nullptr;
+	bool platformInitialized = false;
+};
+
+void CleanupMonitoringContext(MonitoringContext& ctx)
+{
+	if (ctx.platform && ctx.platformInitialized)
 	{
-		_tprintf(_T("%s "), func);
-		for (size_t j = 0; j < MAX_LENGTH - _tcslen(func); ++j)
-		{
-			_tprintf(_T("%c"), '.');
-		}
+		ctx.platform->UnInit();
 	}
-	else
+	if (ctx.hPlatform)
 	{
-		_tprintf(_T("%s Core : %-2d"), func, i);
-		for (size_t j = 0; j < MAX_LENGTH - _tcslen(func) - 9; ++j)
-		{
-			_tprintf(_T("%c"), '.');
-		}
+		FreeLibrary(ctx.hPlatform);
 	}
+	ctx = {};
 }
 
-std::pair<std::wstring, std::wstring> GetCurrentTimeString(bool bFileName = false)
+bool InitMonitoringContext(MonitoringContext& ctx)
 {
-	auto now = std::chrono::system_clock::now();
-	std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-	std::tm now_tm;
-	localtime_s(&now_tm, &now_time);
-
-	std::wostringstream dateStream;
-	std::wostringstream timeStream;
-	dateStream << std::put_time(&now_tm, L"%Y-%m-%d");
-
-	if (bFileName)
-		timeStream << std::put_time(&now_tm, L"%H-%M-%S");
-	else
+	bool bRetCode = false;
+	std::wstring buff = {};
+	DWORD dwTemp = 0;
+	bRetCode = g_GetRegistryValue(HKEY_LOCAL_MACHINE, AMDRM_Monitoring_SDK_REGISTRY_PATH, L"InstallationPath", buff, dwTemp);
+	if (!bRetCode)
 	{
-		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-		auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) % 1000;
-
-		timeStream << std::put_time(&now_tm, L"%H:%M:%S")
-			<< L'.' << std::setfill(L'0') << std::setw(3) << ms.count()
-			<< std::setfill(L'0') << std::setw(3) << us.count();
+		return false;
 	}
-	return { dateStream.str(), timeStream.str() };
+
+	std::wstring temp = buff + L"bin\\Platform.dll";
+	ctx.hPlatform = LoadLibraryEx(temp.c_str(), NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+	if (!ctx.hPlatform)
+	{
+		return false;
+	}
+
+	GetPlatformFunc platformFunc = (GetPlatformFunc)GetProcAddress(ctx.hPlatform, "GetPlatform");
+	if (!platformFunc)
+	{
+		CleanupMonitoringContext(ctx);
+		return false;
+	}
+
+	ctx.platform = &platformFunc();
+	ctx.platformInitialized = ctx.platform->Init();
+	if (!ctx.platformInitialized)
+	{
+		CleanupMonitoringContext(ctx);
+		return false;
+	}
+
+	IDeviceManager& rDeviceManager = ctx.platform->GetIDeviceManager();
+	ctx.cpu = (ICPUEx*)rDeviceManager.GetDevice(dtCPU, 0);
+	ctx.bios = (IBIOSEx*)rDeviceManager.GetDevice(dtBIOS, 0);
+	if (!ctx.cpu || !ctx.bios)
+	{
+		CleanupMonitoringContext(ctx);
+		return false;
+	}
+
+	return true;
 }
+
 
 BOOL IsSupportedProcessor(VOID)
 {
@@ -273,512 +295,266 @@ BOOL IsSupportedProcessor(VOID)
 	return retBool;
 }
 
-void apiCall()
+bool ReadCPUTelemetry(ICPUEx* cpu, double& temperatureC, double& powerW, double& usagePercent)
 {
-bool bRetCode = false;
-	HMODULE hPlatform_Handle = nullptr;
-	LPCWSTR path = {};
-	std::wstring buff = {};
-	DWORD dwTemp = 0;
-	bRetCode = g_GetRegistryValue(HKEY_LOCAL_MACHINE, AMDRM_Monitoring_SDK_REGISTRY_PATH, L"InstallationPath", buff, dwTemp);
-	if (!bRetCode)
+	if (!cpu)
 	{
-		_tprintf(_T("Unexpected Error E1001. Please reinstall AMDRyzenMasterMonitoringSDK\n"));
-		return;
-	}
-
-	std::wstring temp = buff + L"bin\\Platform.dll";
-	path = temp.c_str();
-
-	hPlatform_Handle = LoadLibraryEx(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
-	if (!hPlatform_Handle)
-	{
-		_tprintf(_T("Unexpected Error E1004. Please reinstall AMDRyzenMasterMonitoringSDK\n"));
-		return;
-	}
-
-	GetPlatformFunc platformFunc = (GetPlatformFunc)GetProcAddress(hPlatform_Handle, "GetPlatform");
-	if (!platformFunc)
-	{
-		FreeLibrary(hPlatform_Handle);
-		_tprintf(_T("Platform init failed\n"));
-		return;
-	}
-	IPlatform& rPlatform = platformFunc();
-	bRetCode = rPlatform.Init();
-	if (!bRetCode)
-	{
-		FreeLibrary(hPlatform_Handle);
-		_tprintf(_T("Platform init failed\n"));
-		return;
-	}
-	IDeviceManager& rDeviceManager = rPlatform.GetIDeviceManager();
-	ICPUEx* obj = (ICPUEx*)rDeviceManager.GetDevice(dtCPU, 0);
-	IBIOSEx* objB = (IBIOSEx*)rDeviceManager.GetDevice(dtBIOS, 0);
-	if (obj && objB)
-	{
-		CPUParameters stData;
-		int iRet = obj->GetCPUParameters(stData);
-		if (!iRet)
-		{
-			double occupancy_sum = 0.0;
-			unsigned int occupancy_count = 0;
-			if (stData.stFreqData.dState && stData.stFreqData.uLength)
-			{
-				for (unsigned int i = 0; i < stData.stFreqData.uLength; ++i)
-				{
-					if (stData.stFreqData.dCurrentFreq && stData.stFreqData.dCurrentFreq[i] != 0)
-					{
-						occupancy_sum += stData.stFreqData.dState[i];
-						occupancy_count++;
-					}
-				}
-			}
-			double occupancy_avg = occupancy_count ? (occupancy_sum / occupancy_count) : 0.0;
-
-			wprintf(L"CPU Temperature: %.2f C\n", stData.dTemperature);
-			wprintf(L"PPT Power: %.2f W\n", stData.fPPTValue);
-			wprintf(L"CPU Utilization: %.1f %%\n", occupancy_avg);
-		}
-	}
-	rPlatform.UnInit();
-	FreeLibrary(hPlatform_Handle);
-}
-
-std::wstring GetPowerSchemeName(const GUID* schemeGuid)
-{
-	DWORD bufferSize = 0;
-	DWORD dwRetValue = PowerReadFriendlyName(NULL, schemeGuid, NULL, NULL, NULL, &bufferSize);
-
-	if (dwRetValue != ERROR_SUCCESS || bufferSize == 0)
-	{
-		return L"Unknown";
-	}
-
-	std::wstring friendlyName(bufferSize / sizeof(WCHAR), L'\0');
-	dwRetValue = PowerReadFriendlyName(NULL, schemeGuid, NULL, NULL, reinterpret_cast<BYTE*>(&friendlyName[0]), &bufferSize);
-
-	if (dwRetValue != ERROR_SUCCESS)
-	{
-		return L"Unknown";
-	}
-	return friendlyName;
-}
-
-void LogCPUParameters(unsigned int iDuration, unsigned int iInterval, std::wstring wsFileString)
-{
-	bool bRetCode = false;
-	HMODULE hPlatform_Handle = nullptr;
-	std::wstring wsSDKPathRegValue = {};
-	auto DateTimeForFileName = GetCurrentTimeString(true);
-
-	std::wstring wsFileName = L"RMSDK_Parameter_log_" + (wsFileString.length() ? (wsFileString + L"_") : L"") + DateTimeForFileName.first + L"-" + DateTimeForFileName.second + L".csv";
-
-	std::wofstream file(wsFileName, std::ios::app);
-	if (file.is_open())
-	{
-		LPCWSTR path = {};
-		DWORD dwTemp = 0;
-		bRetCode = g_GetRegistryValue(HKEY_LOCAL_MACHINE, AMDRM_Monitoring_SDK_REGISTRY_PATH, L"InstallationPath", wsSDKPathRegValue, dwTemp);
-		if (!bRetCode)
-		{
-			_tprintf(_T("Unexpected Error E1001. Please reinstall AMDRyzenMasterMonitoringSDK\n"));
-			return;
-		}
-
-		std::wstring temp = wsSDKPathRegValue + L"bin\\Platform.dll";
-		path = temp.c_str();
-
-		hPlatform_Handle = LoadLibraryEx(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
-		if (!hPlatform_Handle)
-		{
-			_tprintf(_T("Unexpected Error E1004. Please reinstall AMDRyzenMasterMonitoringSDK\n"));
-			return;
-		}
-
-		GetPlatformFunc platformFunc = (GetPlatformFunc)GetProcAddress(hPlatform_Handle, "GetPlatform");
-		if (!platformFunc)
-		{
-			FreeLibrary(hPlatform_Handle);
-			_tprintf(_T("Platform init failed\n"));
-			return;
-		}
-		IPlatform& rPlatform = platformFunc();
-		bRetCode = rPlatform.Init();
-		if (!bRetCode)
-		{
-			FreeLibrary(hPlatform_Handle);
-			_tprintf(_T("Platform init failed\n"));
-			return;
-		}
-		IDeviceManager& rDeviceManager = rPlatform.GetIDeviceManager();
-		ICPUEx* obj = (ICPUEx*)rDeviceManager.GetDevice(dtCPU, 0);
-		IBIOSEx* objB = (IBIOSEx*)rDeviceManager.GetDevice(dtBIOS, 0);
-
-		if (obj && objB)
-		{
-			WCHAR wDate[50] = { '\0' };
-			WCHAR wYear[5] = { '\0' };
-			WCHAR wMonth[3] = { '\0' };
-			WCHAR wDay[3] = { '\0' };
-			auto fullPath = std::filesystem::absolute(wsFileName);
-			HKEY UserRootPowerKey = NULL;
-			GUID* activeSchemeGuid = nullptr;
-			SYSTEM_POWER_STATUS sps;
-			wcscpy_s(wDate, objB->GetDate());
-			wcsncpy_s(wYear, wDate, 4);
-			wYear[4] = '\0';
-			wcsncpy_s(wMonth, wDate + 4, 2);
-			wMonth[2] = '\0';
-			wcsncpy_s(wDay, wDate + 6, 2);
-			wDay[2] = '\0';
-			CPUParameters stData;
-			unsigned int uCorePark = 0;
-			int iRet = 0;
-
-			iRet = obj->GetCPUParameters(stData);
-			if (iRet)
-			{
-				if (iRet == bUnsupportedFunction)
-				{
-					std::cerr << "Logging Feature is not supported. Exiting...\n";
-					return;
-				}
-				std::cerr << "Failed to get the CPU Parameters. Error Code : ";
-				_tprintf(_T(" %s\n"), PrintErr[iRet + 1]);
-				return;
-			}
-
-			iRet = obj->GetCorePark(uCorePark);
-
-			if (iRet)
-			{
-				std::cerr << "Failed to get the Core park information. Error Code : ";
-				_tprintf(_T(" %s\n"), PrintErr[iRet + 1]);
-				return;
-			}
-
-			file << L"System Details" << std::endl;
-			file << L"System Name," << GetSystemName() << std::endl;
-			file << L"Processor Name," << (obj->GetName()) << std::endl;
-			file << L"OS Version," << GetOSVersion() << std::endl;
-			file << L"BIOS date," << (wYear) << L"/" << (wMonth) << "/" << (wDay) << std::endl;
-			file << L"BIOS Version," << (objB->GetVersion()) << std::endl;
-			file << L"BIOS Vendor," << (objB->GetVendor()) << std::endl;
-			file << std::endl << std::endl;
-			
-			auto logStart = std::chrono::steady_clock::now();
-			auto logEnd = logStart + std::chrono::minutes(iDuration);
-
-			file << "Date ,Time ,Active Power Scheme ,AC power status,";
-			file << "PPT Current Limit (W) ,PPT Current Value (W),";
-			file << "EDC(VDD) Current Limit (A) ,EDC(VDD) Current Value (A),";
-			if (stData.fEDCValue_VDD_1 != -1)
-			{
-				file << "EDC(VDD)_1 Current Value (A),";
-			}
-			file << "TDC(VDD) Current Limit (A) ,TDC(VDD) Current Value (A),";
-			if (stData.fTDCValue_VDD_1 != -1)
-			{
-				file << "TDC(VDD)_1 Current Value (A),";
-			}
-			if (stData.fEDCLimit_SOC != -1)
-			{
-				file << "EDC(SOC) Current Limit (A),";
-			}
-			if (stData.fEDCValue_SOC != -1)
-				file << "EDC(SOC) Current Value (A) ,";
-			if (stData.fTDCLimit_SOC != -1)
-				file << "TDC(SOC) Current Limit (A) ,";
-			if (stData.fTDCValue_SOC != -1)
-				file << "TDC(SOC) Current Value (A) ,";
-			if (stData.fEDCLimit_CCD != -1)
-				file << "EDC(CCD) Current Limit (A),";
-			if (stData.fEDCValue_CCD != -1)
-				file << "EDC(CCD) Current Value (A),";
-			if (stData.fTDCLimit_CCD != -1)
-				file << "TDC(CCD) Current Limit (A),";
-			if (stData.fTDCValue_CCD != -1)
-				file << "TDC(CCD) Current Value (A),";
-
-			file << "Fabric Clock Frequency	(MHz),";
-			file << "VDDCR(VDD) Power (W),";
-			file << "VDDCR(SOC) Power (W),";
-			file << "Fmax(CPU Clock) frequency (MHz),";
-			file << "Peak Speed (MHz),";
-			file << "PeakCore(s) Voltage (V),";
-			file << "Average Core Voltage (V),";
-			file << "VDDCR_SOC (V),";
-			file << "cHTC Limit (Celsius),";
-			file << "Current Temperature (Celsius),";
-
-			if (stData.dPeakCoreVoltage_1 != -1)
-				file << "PeakCore(s) Voltage_1 (V),";
-			if (stData.dAvgCoreVoltage_1 != -1)
-				file << "Average Core Voltage_1 (V),";
-
-			file << "Current OCMode,";
-
-			for (int i = 0; i < stData.stFreqData.uLength - uCorePark; i++)
-			{
-				file << "Core " << i << " EffectiveFrequency (MHz),";
-			}
-			for (int i = 0; i < stData.stFreqData.uLength - uCorePark; i++)
-			{
-				file << "Core " << i << " C0 Residency (%),";
-			}
-			for (int i = 0; i < stData.stFreqData.uLength - uCorePark; i++)
-			{
-				file << "Core " << i << " CurrentFrequency (MHz),";
-			}
-			for (int i = 0; i < stData.stFreqData.uLength - uCorePark; i++)
-			{
-				file << "Core " << i << " CurrentTemperature (C),";
-			}
-
-			std::cout << "\nLogging with " << iInterval << " seconds sampling interval for " << iDuration << " minutes to file : \n\n" << fullPath << std::endl << std::endl;
-
-			while (logStart < logEnd)
-			{
-				auto timeStampForLog = GetCurrentTimeString();
-				
-				iRet = obj->GetCPUParameters(stData);
-
-				if (iRet)
-				{
-					_tprintf(_T(" %s\n"), PrintErr[iRet + 1]);
-				}
-				else
-				{
-					file << std::endl;
-					file << timeStampForLog.first << "," << timeStampForLog.second << ",";
-					DWORD result = PowerGetActiveScheme(UserRootPowerKey, &activeSchemeGuid);
-					if (result == ERROR_SUCCESS)
-					{
-						std::wstring schemeName = GetPowerSchemeName(activeSchemeGuid);
-						file << schemeName << ",";
-						LocalFree(activeSchemeGuid);
-					}
-					else
-					{
-						file << L"Unknown Power Scheme,";
-						std::cerr << "Failed to get the active power scheme. Error code: " << result << std::endl;
-					}
-
-					if (GetSystemPowerStatus(&sps))
-					{
-						std::wstring strACStatus = L"Unknown status,";
-						if (sps.ACLineStatus == 0)
-							strACStatus = L"DC,";
-						else if (sps.ACLineStatus == 1)
-							strACStatus = L"AC,";
-						file << strACStatus;
-					}
-					else
-					{
-						file << L"Unknown Status,";
-						std::cerr << "Failed to get the AC power status." << std::endl;
-					}
-
-					file << stData.fPPTLimit << "," << stData.fPPTValue << ",";
-					file << stData.fEDCLimit_VDD << "," << stData.fEDCValue_VDD << ",";
-					if (stData.fEDCValue_VDD_1 != -1)
-						file << stData.fEDCValue_VDD_1 << ",";
-					file << stData.fTDCLimit_VDD << "," << stData.fTDCValue_VDD << ",";
-					if (stData.fTDCValue_VDD_1 != -1)
-						file << stData.fTDCValue_VDD_1 << ",";
-					if (stData.fEDCLimit_SOC != -1)
-						file << stData.fEDCLimit_SOC << ",";
-					if (stData.fEDCValue_SOC != -1)
-						file << stData.fEDCValue_SOC << ",";
-					if (stData.fTDCLimit_SOC != -1)
-						file << stData.fTDCLimit_SOC << ",";
-					if (stData.fTDCValue_SOC != -1)
-						file << stData.fTDCValue_SOC << ",";
-					if (stData.fEDCLimit_CCD != -1)
-						file << stData.fEDCLimit_CCD << ",";
-					if (stData.fEDCValue_CCD != -1)
-						file << stData.fEDCValue_CCD << ",";
-					if (stData.fTDCLimit_CCD != -1)
-						file << stData.fTDCLimit_CCD << ",";
-					if (stData.fTDCValue_CCD != -1)
-						file << stData.fTDCValue_CCD << ",";
-
-					file << stData.fFCLKP0Freq << ",";
-					file << stData.fVDDCR_VDD_Power << ",";
-					file << stData.fVDDCR_SOC_Power << ",";
-					file << stData.fCCLK_Fmax << ",";
-					file << stData.dPeakSpeed << ",";
-					file << stData.dPeakCoreVoltage << ",";
-					file << stData.dAvgCoreVoltage << ",";
-					file << stData.dSocVoltage << ",";
-					file << stData.fcHTCLimit << ",";
-					file << stData.dTemperature << ",";
-
-					if (stData.dPeakCoreVoltage_1 != -1)
-					{
-						file << stData.dPeakCoreVoltage_1 << ",";
-					}
-					if (stData.dAvgCoreVoltage_1 != -1)
-					{
-						file << stData.dAvgCoreVoltage_1 << ",";
-					}
-
-					if (stData.eMode.uManual)
-					{
-						file << "Manual Mode,";
-					}
-					else if (stData.eMode.uPBOMode)
-					{
-						file << "PBO Mode,";
-					}
-					else if (stData.eMode.uAutoOverclocking)
-					{
-						file << "Auto Overclocking Mode,";
-					}
-					else if (stData.eMode.uEcoMode)
-					{
-						file << "ECO Mode,";
-					}
-					else if (stData.eMode.uDefault_IRM)
-					{
-						file << "Default_IRM Mode,";
-					}
-					else
-					{
-						file << "Default Mode,";
-					}
-
-					for (int i = 0; i < stData.stFreqData.uLength - uCorePark; i++)
-					{
-						file << stData.stFreqData.dFreq[i] << ",";
-					}
-					for (int i = 0; i < stData.stFreqData.uLength - uCorePark; i++)
-					{
-						file << stData.stFreqData.dState[i] << ",";
-					}
-					for (int i = 0; i < stData.stFreqData.uLength - uCorePark; i++)
-					{
-						file << stData.stFreqData.dCurrentFreq[i] << ",";
-					}
-					for (int i = 0; i < stData.stFreqData.uLength - uCorePark; i++)
-					{
-						file << stData.stFreqData.dCurrentTemp[i] << ",";
-					}
-				}
-				std::this_thread::sleep_for(std::chrono::seconds(iInterval));
-				logStart = std::chrono::steady_clock::now();
-			}
-		}
-		std::cout << "Logging Completed ... " << std::endl;
-		file.close();
-	}
-	else
-	{
-		std::wcerr << L"Unable to open file for logging.\n file name : " << wsFileName << std::endl;
-	}
-}
-
-/** @brief	Pattern matches with the string, ingnores cases
-*	@return	TRUE : if strings matched
-*			FALSE: if string not matched
-*/
-INT PatternMatch(LPCSTR s1, LPCSTR s2)
-{
-	int i;
-	for (i = 0; s1[i] && s2[i]; ++i)
-	{
-		/* If characters are same or inverting the 6th bit makes them same */
-		if (s1[i] == s2[i] || (s1[i] ^ 32) == s2[i])
-			continue;
-		else
-			break;
-	}
-
-	/* Compare the last (or first mismatching in case of not same) characters */
-	if (s1[i] == s2[i])
-		return 0;
-	if ((s1[i] | 32) < (s2[i] | 32))
-		return -1;
-	return 1;
-}
-
-void ShowUsage()
-{
-	std::cout << "Options: " << std::endl;
-	std::cout << "\t-H     \t  : Show help\n\t-L   \t  : Log CPU Parameters" << std::endl;
-	std::cout << "\t\tTo Generate logs use -L option as follows :" << std::endl;
-	std::cout << "\t\t-L <Total log duration in minutes> <Log interval in seconds> <Optional String to be append in log file name>" << std::endl;
-}
-bool IsInteger(const char* str)
-{
-	if (str == nullptr || *str == '\0')
 		return false;
+	}
 
-	for (size_t i = 0; i < strlen(str); ++i)
+	CPUParameters stData = {};
+	int iRet = cpu->GetCPUParameters(stData);
+	if (iRet)
 	{
-		if (!std::isdigit(str[i]))
-			return false;
+		return false;
+	}
+
+	double occupancy_sum = 0.0;
+	unsigned int occupancy_count = 0;
+	if (stData.stFreqData.dState && stData.stFreqData.uLength && stData.stFreqData.dCurrentFreq)
+	{
+		for (unsigned int i = 0; i < stData.stFreqData.uLength; ++i)
+		{
+			if (stData.stFreqData.dCurrentFreq[i] != 0)
+			{
+				occupancy_sum += stData.stFreqData.dState[i];
+				occupancy_count++;
+			}
+		}
+	}
+
+	usagePercent = occupancy_count ? (occupancy_sum / occupancy_count) : 0.0;
+	temperatureC = stData.dTemperature;
+	powerW = stData.fPPTValue;
+	return true;
+}
+
+std::wstring FindHidDevicePath(USHORT vid, USHORT pid)
+{
+	GUID hidGuid;
+	HidD_GetHidGuid(&hidGuid);
+	HDEVINFO deviceInfo = SetupDiGetClassDevs(&hidGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+	if (deviceInfo == INVALID_HANDLE_VALUE)
+	{
+		return L"";
+	}
+
+	SP_DEVICE_INTERFACE_DATA interfaceData = {};
+	interfaceData.cbSize = sizeof(interfaceData);
+
+	for (DWORD index = 0; SetupDiEnumDeviceInterfaces(deviceInfo, NULL, &hidGuid, index, &interfaceData); ++index)
+	{
+		DWORD requiredSize = 0;
+		SetupDiGetDeviceInterfaceDetail(deviceInfo, &interfaceData, NULL, 0, &requiredSize, NULL);
+		if (!requiredSize)
+		{
+			continue;
+		}
+
+		std::vector<BYTE> detailBuffer(requiredSize);
+		auto detailData = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detailBuffer.data());
+		detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+
+		if (!SetupDiGetDeviceInterfaceDetail(deviceInfo, &interfaceData, detailData, requiredSize, NULL, NULL))
+		{
+			continue;
+		}
+
+		HANDLE handle = CreateFile(detailData->DevicePath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (handle == INVALID_HANDLE_VALUE)
+		{
+			continue;
+		}
+
+		HIDD_ATTRIBUTES attributes = {};
+		attributes.Size = sizeof(attributes);
+		BOOL matched = HidD_GetAttributes(handle, &attributes);
+		CloseHandle(handle);
+
+		if (matched && attributes.VendorID == vid && attributes.ProductID == pid)
+		{
+			std::wstring path(detailData->DevicePath);
+			SetupDiDestroyDeviceInfoList(deviceInfo);
+			return path;
+		}
+	}
+
+	SetupDiDestroyDeviceInfoList(deviceInfo);
+	return L"";
+}
+
+bool WriteHidPacket(HANDLE deviceHandle, const std::array<uint8_t, 64>& payload)
+{
+	DWORD bytesWritten = 0;
+	BOOL status = WriteFile(deviceHandle, payload.data(), static_cast<DWORD>(payload.size()), &bytesWritten, NULL);
+	if (!status || bytesWritten != payload.size())
+	{
+		return false;
+	}
+	return true;
+}
+
+bool InitUsbDevice(HANDLE& deviceHandle)
+{
+	deviceHandle = INVALID_HANDLE_VALUE;
+	std::wstring devicePath = FindHidDevicePath(kFixedVid, kFixedPid);
+	if (devicePath.empty())
+	{
+		return false;
+	}
+
+	deviceHandle = CreateFile(devicePath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (deviceHandle == INVALID_HANDLE_VALUE)
+	{
+		return false;
+	}
+
+	std::array<uint8_t, 64> packet = {};
+	packet[0] = 16;
+	packet[1] = 104;
+	packet[2] = 1;
+	packet[3] = 1;
+
+	std::array<uint8_t, 64> initPacket = packet;
+	initPacket[4] = 2;
+	initPacket[5] = 3;
+	initPacket[6] = 1;
+	initPacket[7] = 112;
+	initPacket[8] = 22;
+	if (!WriteHidPacket(deviceHandle, initPacket))
+	{
+		CloseHandle(deviceHandle);
+		deviceHandle = INVALID_HANDLE_VALUE;
+		return false;
+	}
+
+	initPacket[5] = 2;
+	initPacket[7] = 111;
+	if (!WriteHidPacket(deviceHandle, initPacket))
+	{
+		CloseHandle(deviceHandle);
+		deviceHandle = INVALID_HANDLE_VALUE;
+		return false;
 	}
 
 	return true;
 }
 
-void Process_program_options(const int argc, char* const argv[])
+bool SendUsbStatusPacket(HANDLE deviceHandle, int temperatureC, int powerW, int usagePercent)
 {
-	try
+	std::array<uint8_t, 64> packet = {};
+	packet[0] = 16;
+	packet[1] = 104;
+	packet[2] = 1;
+	packet[3] = 1;
+	packet[4] = 11;
+	packet[5] = 1;
+	packet[6] = 2;
+	packet[7] = 5;
+
+	uint16_t powerInt = static_cast<uint16_t>(std::clamp(powerW, 0, 65535));
+	packet[8] = static_cast<uint8_t>(powerInt >> 8);
+	packet[9] = static_cast<uint8_t>(powerInt & 0xFF);
+
+	packet[10] = 0;
+	uint32_t tempBits = 0;
+	float tempValue = static_cast<float>(temperatureC);
+	std::memcpy(&tempBits, &tempValue, sizeof(tempBits));
+	packet[11] = static_cast<uint8_t>((tempBits >> 24) & 0xFF);
+	packet[12] = static_cast<uint8_t>((tempBits >> 16) & 0xFF);
+	packet[13] = static_cast<uint8_t>((tempBits >> 8) & 0xFF);
+	packet[14] = static_cast<uint8_t>(tempBits & 0xFF);
+
+	uint8_t utilization = static_cast<uint8_t>(std::clamp(usagePercent, 0, 100));
+	packet[15] = utilization;
+
+	uint16_t checksum = 0;
+	for (size_t i = 1; i <= 15; ++i)
 	{
-		if (argc == 1)
+		checksum += packet[i];
+	}
+	packet[16] = static_cast<uint8_t>(checksum % 256);
+	packet[17] = 22;
+
+	return WriteHidPacket(deviceHandle, packet);
+}
+
+void StreamToConsoleAndUsb()
+{
+	MonitoringContext ctx;
+	if (!InitMonitoringContext(ctx))
+	{
+		return;
+	}
+
+	HANDLE usbHandle = INVALID_HANDLE_VALUE;
+	bool usbReady = InitUsbDevice(usbHandle);
+	while (true)
+	{
+		double temperatureC = 0.0;
+		double powerW = 0.0;
+		double usagePercent = 0.0;
+
+		auto tryReadTelemetry = [&](int maxAttempts) -> bool
 		{
-			apiCall();
-			return;
-		}
-		if (argc != 4 && argc != 5)
-		{
-			ShowUsage();
-			return;
-		}
-		if ((PatternMatch(argv[1], "-L") == 0) || (PatternMatch(argv[1], "--log") == 0))
-		{
-			if (IsInteger(argv[2]) && IsInteger(argv[3]))
+			for (int attempt = 1; attempt <= maxAttempts; ++attempt)
 			{
-				unsigned int iDuration = atoi(argv[2]);
-				unsigned int iInterval = atoi(argv[3]);
-				std::wstring wsFileString = L"";
-				if (argc == 5)
+				if (ReadCPUTelemetry(ctx.cpu, temperatureC, powerW, usagePercent))
 				{
-					wsFileString = std::wstring(argv[4], argv[4] + strlen(argv[4]));
-					std::wregex validFileNameRegex(LR"(^[^<>:"/\\|?*]+$)");
-					bool status = std::regex_match(wsFileString, validFileNameRegex);
-					if (!status)
+					if (attempt > 1)
 					{
-						throw (L"File name is not valid");
 					}
+					return true;
 				}
-				if (iInterval > iDuration * 60)
-					throw (L"Log interval can not be greater than total log duration");
-				if (iInterval == 0 || iDuration == 0)
-					throw (L"Log interval and Log Duration can not be 0");
-				LogCPUParameters(iDuration, iInterval, wsFileString);
-				return;
+
+				if (attempt < maxAttempts)
+				{
+					std::this_thread::sleep_for(std::chrono::seconds(1));
+				}
 			}
-			else
+			return false;
+		};
+
+		bool telemetryOk = tryReadTelemetry(10);
+		if (!telemetryOk)
+		{
+			std::this_thread::sleep_for(std::chrono::minutes(1));
+
+			telemetryOk = tryReadTelemetry(10);
+			if (!telemetryOk)
 			{
-				ShowUsage();
-				return;
+				break;
 			}
 		}
-		ShowUsage();
+
+		int tempRounded = static_cast<int>(std::lround(temperatureC));
+		int powerRounded = static_cast<int>(std::lround(powerW));
+		int usageRounded = static_cast<int>(std::lround(usagePercent));
+
+		if (usbReady)
+		{
+			if (!SendUsbStatusPacket(usbHandle, tempRounded, powerRounded, usageRounded))
+			{
+				CloseHandle(usbHandle);
+				usbHandle = INVALID_HANDLE_VALUE;
+				usbReady = false;
+			}
+		}
+
+		std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
-	catch (LPCTSTR strErr)
+
+	if (usbHandle != INVALID_HANDLE_VALUE)
 	{
-		ShowError(strErr, FALSE, 1);
+		CloseHandle(usbHandle);
 	}
-	return;
+	CleanupMonitoringContext(ctx);
 }
 
 extern "C" int run_sample_app(int argc, CHAR **argv)
 {
+	(void)argc;
+	(void)argv;
 	//Check if application running with admin privileged or not
 	if (!IsUserAnAdmin())
 	{
@@ -807,13 +583,7 @@ extern "C" int run_sample_app(int argc, CHAR **argv)
 		ShowError(_T("Not Supported Processor!"), FALSE, 1);
 	}
 	
-	try {
-		Process_program_options(argc, argv);
-	}
-	catch (...)
-	{
-		ShowError(_T("Unable to Process the command!"), FALSE, 1);
-	}
+	StreamToConsoleAndUsb();
 
 	return 0;
 }

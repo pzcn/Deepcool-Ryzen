@@ -16,27 +16,8 @@
 
 VOID ShowError(LPCTSTR userMsg, BOOL printErrorMsg, DWORD exitCode)
 {
-	DWORD eMsgLen, errNum = GetLastError();
-	LPTSTR localSysMsg;
-
-	_ftprintf(stderr, _T("%s\n"), userMsg);
-
-	if (printErrorMsg) {
-		eMsgLen = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
-			NULL, errNum, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-			(LPTSTR)&localSysMsg, 0, NULL);
-
-		if (eMsgLen > 0)
-		{
-			_ftprintf(stderr, _T("%s\n"), localSysMsg);
-		}
-		else
-		{
-			_ftprintf(stderr, _T("Last known Error; %d.\n"), errNum);
-		}
-
-		if (localSysMsg != NULL) LocalFree(localSysMsg);
-	}
+	(void)userMsg;
+	(void)printErrorMsg;
 
 	if (exitCode > 0)
 		ExitProcess(exitCode);
@@ -191,7 +172,7 @@ bool InstallDriver(void)
 					NULL, NULL, NULL, NULL, NULL);
 			}
 			else
-				printf("InstallDriver: error code returned from CreateService is: %d", GetLastError());
+				(void)GetLastError();
 		}
 		LOG_PROCESS_ERROR(hService);
 

@@ -1,0 +1,1 @@
+C:\Users\pedroz\Documents\GitHub\Deepcool\rust\target\release\ryzenmaster-monitor.exe: C:\Users\pedroz\Documents\GitHub\Deepcool\rust\build.rs C:\Users\pedroz\Documents\GitHub\Deepcool\rust\src\main.rs

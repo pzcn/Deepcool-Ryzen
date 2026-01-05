@@ -29,8 +29,6 @@ bool g_GetRegistryValue(HKEY hRootKey, LPCWSTR keyPath, const wchar_t* valueName
 std::wstring GetSystemName();
 std::wstring GetOSVersion();
 
-#define LOG_PRINT(dRet, ch) (dRet==-1)?_tprintf(_T(" NA\n")) : _tprintf(_T(" %0.1f %s\n"), dRet, ch);
-
 #define LOG_PROCESS_ERROR(__CONDITION__)		\
 	do											\
 	{											\
