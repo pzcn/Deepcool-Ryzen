@@ -6,6 +6,11 @@ fn main() {
         return;
     }
 
+    println!("cargo:rerun-if-changed=Platform.dll");
+    println!("cargo:rerun-if-changed=Device.dll");
+    embed_manifest::embed_manifest_file("app.manifest")
+        .expect("failed to embed Windows app manifest");
+
     let sdk_path = env::var("AMDRMMONITORSDKPATH").unwrap_or_else(|_| {
         panic!(
             "AMDRMMONITORSDKPATH is not set. Point it to the Ryzen Master Monitoring SDK root to build."

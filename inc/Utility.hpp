@@ -21,6 +21,8 @@ BOOL Authentic_AMD();
 INT QueryDrvService();
 bool IsSupportedOS();
 bool InstallDriver(void);
+void SetMonitorSdkPath(const wchar_t* path);
+const wchar_t* GetMonitorSdkPath();
 bool g_GetRegistryValue(HKEY hRootKey, LPCWSTR keyPath, const wchar_t* valueName, std::wstring& ulValue, bool bIsDWORD = false);
 
 #define LOG_PROCESS_ERROR(__CONDITION__)		\

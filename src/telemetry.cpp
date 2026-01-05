@@ -45,6 +45,38 @@ struct MonitoringContext
 	bool platformInitialized = false;
 };
 
+static bool TryLoadPlatformFromFile(MonitoringContext& ctx, const std::wstring& dllPath)
+{
+	if (dllPath.empty())
+	{
+		return false;
+	}
+
+	ctx.hPlatform = LoadLibraryExW(dllPath.c_str(), NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+	return ctx.hPlatform != nullptr;
+}
+
+static bool TryLoadPlatformFromDir(MonitoringContext& ctx, const std::wstring& dir)
+{
+	if (dir.empty())
+	{
+		return false;
+	}
+
+	std::wstring base = dir;
+	if (!base.empty() && base.back() != L'\\' && base.back() != L'/')
+	{
+		base += L'\\';
+	}
+
+	if (TryLoadPlatformFromFile(ctx, base + L"Platform.dll"))
+	{
+		return true;
+	}
+
+	return TryLoadPlatformFromFile(ctx, base + L"bin\\Platform.dll");
+}
+
 void CleanupMonitoringContext(MonitoringContext& ctx)
 {
 	if (ctx.platform && ctx.platformInitialized)
@@ -60,14 +92,12 @@ void CleanupMonitoringContext(MonitoringContext& ctx)
 
 bool InitMonitoringContext(MonitoringContext& ctx)
 {
-	std::wstring buff = {};
-	if (!g_GetRegistryValue(HKEY_LOCAL_MACHINE, AMDRM_Monitoring_SDK_REGISTRY_PATH, L"InstallationPath", buff))
+	const wchar_t* sdkPath = GetMonitorSdkPath();
+	if (!sdkPath || !TryLoadPlatformFromDir(ctx, sdkPath))
 	{
 		return false;
 	}
 
-	std::wstring temp = buff + L"bin\\Platform.dll";
-	ctx.hPlatform = LoadLibraryEx(temp.c_str(), NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
 	if (!ctx.hPlatform)
 	{
 		return false;
@@ -330,6 +360,11 @@ struct RMMonitorContext
 {
     MonitoringContext ctx = {};
 };
+
+extern "C" void rm_monitor_set_sdk_path(const wchar_t* path)
+{
+    SetMonitorSdkPath(path);
+}
 
 extern "C" int rm_monitor_init(RMMonitorContext** out_ctx)
 {

@@ -7,6 +7,29 @@
 #include <intrin.h>
 #include <windows.h>
 
+static std::wstring g_monitor_sdk_path;
+
+void SetMonitorSdkPath(const wchar_t* path)
+{
+	if (path && *path)
+	{
+		g_monitor_sdk_path = path;
+	}
+	else
+	{
+		g_monitor_sdk_path.clear();
+	}
+}
+
+const wchar_t* GetMonitorSdkPath()
+{
+	if (g_monitor_sdk_path.empty())
+	{
+		return nullptr;
+	}
+	return g_monitor_sdk_path.c_str();
+}
+
 /** @brief  To check whether Vendor is AMD or not
 */
 BOOL Authentic_AMD()
@@ -87,11 +110,11 @@ bool IsSupportedOS()
 
 bool GetDriverPath(wchar_t* pDriverPath)
 {
-	wchar_t* pTemp = _wgetenv(L"AMDRMMONITORSDKPATH");
+	const wchar_t* pTemp = GetMonitorSdkPath();
 	wchar_t driverPath[200] = { '\0' };
 	size_t iDriverPathLength = 0;
 
-	LOG_PROCESS_ERROR(pTemp);
+	LOG_PROCESS_ERROR(pTemp && *pTemp);
 
 	iDriverPathLength = wcslen(pTemp);
 	wcsncpy(driverPath, pTemp, iDriverPathLength);
