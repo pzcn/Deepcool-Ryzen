@@ -21,7 +21,7 @@ fn main() {
         .define("_UNICODE", None)
         .include("../inc")
         .include(sdk_include)
-        .file("../src/sampleApp.cpp")
+        .file("../src/telemetry.cpp")
         .file("../src/Utility.cpp")
         .compile("ryzenmaster_wrapper");
 

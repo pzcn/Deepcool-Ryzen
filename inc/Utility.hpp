@@ -4,12 +4,9 @@
 //            Developed by: Advanced Micro Devices, Inc.
 
 #pragma once
-#include <iostream>
 #include <windows.h>
-#include <tchar.h>
 #include <Lm.h>
 #include <VersionHelpers.h>
-#include <intrin.h>
 #include <string>
 #include "GlobalDef.h"
 
@@ -20,14 +17,11 @@
 #define AMDRM_Monitoring_SDK_REGISTRY_PATH	L"Software\\AMD\\RyzenMasterMonitoringSDK"
 #define MS_OS_Version_REGISTRY_PATH	L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
 
-VOID ShowError(LPCTSTR userMsg, BOOL printErrorMsg, DWORD exitCODE);
 BOOL Authentic_AMD();
 INT QueryDrvService();
 bool IsSupportedOS();
 bool InstallDriver(void);
 bool g_GetRegistryValue(HKEY hRootKey, LPCWSTR keyPath, const wchar_t* valueName, std::wstring& ulValue, bool bIsDWORD = false);
-std::wstring GetSystemName();
-std::wstring GetOSVersion();
 
 #define LOG_PROCESS_ERROR(__CONDITION__)		\
 	do											\

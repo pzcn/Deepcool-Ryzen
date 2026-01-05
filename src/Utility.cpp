@@ -6,24 +6,6 @@
 #include "Utility.hpp"
 #include <intrin.h>
 #include <windows.h>
-#include <iostream>
-
-/**	@brief	report Error messages back to user
-*	@param	userMsg  user specific to be shown on console
-*	@param	exitCode   each exitCode can be defined to denote different message to user
-*	@param	printErrorMesg  show last error message if this flag is set via GetLastError
-*/
-
-VOID ShowError(LPCTSTR userMsg, BOOL printErrorMsg, DWORD exitCode)
-{
-	(void)userMsg;
-	(void)printErrorMsg;
-
-	if (exitCode > 0)
-		ExitProcess(exitCode);
-
-	return;
-}
 
 /** @brief  To check whether Vendor is AMD or not
 */
@@ -31,11 +13,9 @@ BOOL Authentic_AMD()
 {
 	char CPUString[0x20];
 	int CPUInfo[4] = { -1 };
-	unsigned nIds;
 	char string[] = "AuthenticAMD";
 
 	__cpuid(CPUInfo, 0);
-	nIds = CPUInfo[0];
 	memset(CPUString, 0, sizeof(CPUString));
 	*((int*)CPUString) = CPUInfo[1];
 	*((int*)(CPUString + 4)) = CPUInfo[3];
@@ -256,39 +236,4 @@ bool g_GetRegistryValue(HKEY hRootKey, LPCWSTR keyPath, const wchar_t* valueName
 	RegCloseKey(hKey);
 
 	return hr == ERROR_SUCCESS;
-}
-
-std::wstring GetOSVersion()
-{
-	std::wstring wsOSVersion = L"Unknown";
-	std::wstring wsBuildNumber = {};
-	std::wstring wsMajorVersion = {};
-	std::wstring wsMinorVersion = {};
-
-	bool bRetCode = g_GetRegistryValue(HKEY_LOCAL_MACHINE, MS_OS_Version_REGISTRY_PATH, L"CurrentMajorVersionNumber", wsMajorVersion, true);
-	if (!bRetCode)
-		return wsOSVersion;
-
-	bRetCode = g_GetRegistryValue(HKEY_LOCAL_MACHINE, MS_OS_Version_REGISTRY_PATH, L"CurrentMinorVersionNumber", wsMinorVersion, true);
-	if (!bRetCode)
-		return wsOSVersion;
-
-	bRetCode = g_GetRegistryValue(HKEY_LOCAL_MACHINE, MS_OS_Version_REGISTRY_PATH, L"CurrentBuild", wsBuildNumber);
-	if (!bRetCode)
-		return wsOSVersion;
-
-	wsOSVersion = wsMajorVersion + L"." + wsMinorVersion + L"." + wsBuildNumber;
-
-	return wsOSVersion;
-}
-
-std::wstring GetSystemName()
-{
-	WCHAR computerName[MAX_COMPUTERNAME_LENGTH + 1];
-	DWORD size = sizeof(computerName) / sizeof(computerName[0]);
-	if (GetComputerName(computerName, &size))
-	{
-		return computerName;
-	}
-	return L"Unknown System Name";
 }

@@ -72,7 +72,7 @@ mod windows_app {
         fn drop(&mut self) {
             unsafe {
                 if !self.0.is_invalid() {
-                    CloseHandle(self.0);
+                    let _ = CloseHandle(self.0);
                 }
             }
         }
@@ -286,7 +286,7 @@ mod windows_app {
                     return Some(HidHandle(handle));
                 }
 
-                CloseHandle(handle);
+                let _ = CloseHandle(handle);
                 index += 1;
             }
 

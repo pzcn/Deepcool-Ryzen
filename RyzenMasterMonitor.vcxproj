@@ -22,7 +22,7 @@
     <ClInclude Include="inc\Utility.hpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\sampleApp.cpp" />
+    <ClCompile Include="src\telemetry.cpp" />
     <ClCompile Include="src\Utility.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -32,9 +32,9 @@
     <VCProjectVersion>15.0</VCProjectVersion>
     <ProjectGuid>{F4B62263-1237-4EF4-AFEC-20F490EB2FF2}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>AMDRyzenMasterMonitoringSampleApp</RootNamespace>
+    <RootNamespace>RyzenMasterMonitor</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-    <ProjectName>AMDRyzenMasterMonitoringSampleApp</ProjectName>
+    <ProjectName>RyzenMasterMonitor</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">

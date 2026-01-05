@@ -3,7 +3,6 @@
 //
 //            Developed by: Advanced Micro Devices, Inc.
 
-#pragma once
 #include <windows.h>
 #include <Shlobj.h>
 #include <intrin.h>
@@ -61,11 +60,8 @@ void CleanupMonitoringContext(MonitoringContext& ctx)
 
 bool InitMonitoringContext(MonitoringContext& ctx)
 {
-	bool bRetCode = false;
 	std::wstring buff = {};
-	DWORD dwTemp = 0;
-	bRetCode = g_GetRegistryValue(HKEY_LOCAL_MACHINE, AMDRM_Monitoring_SDK_REGISTRY_PATH, L"InstallationPath", buff, dwTemp);
-	if (!bRetCode)
+	if (!g_GetRegistryValue(HKEY_LOCAL_MACHINE, AMDRM_Monitoring_SDK_REGISTRY_PATH, L"InstallationPath", buff))
 	{
 		return false;
 	}

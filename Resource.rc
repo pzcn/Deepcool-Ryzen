@@ -67,12 +67,12 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "Advanced Micro Devices"
-            VALUE "FileDescription", "AMDRyzenMasterMonitoring SampleApp"
+            VALUE "FileDescription", "AMD Ryzen Master Monitor"
 VALUE "FileVersion", "3.0.1.4732"
-            VALUE "InternalName", "AMDRyzenMasterMonitoring SampleApp"
+            VALUE "InternalName", "RyzenMasterMonitor"
             VALUE "LegalCopyright", "Copyright© 2024-2025 AMD, Inc."
-            VALUE "OriginalFilename", "AMDRyzenMasterMonitoringSampleApp.exe"
-            VALUE "ProductName", "AMDRyzenMasterMonitoring SampleApp"
+            VALUE "OriginalFilename", "RyzenMasterMonitor.exe"
+            VALUE "ProductName", "AMD Ryzen Master Monitor"
 VALUE "ProductVersion", "3.0.1.4732"
         END
     END
