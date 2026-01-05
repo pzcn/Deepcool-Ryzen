@@ -1,4 +1,5 @@
 use hidapi::{HidApi, HidDevice};
+use std::io::{self, BufRead};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -9,24 +10,41 @@ const LD_MAX_PAYLOAD: usize = LD_REPORT_SIZE - 1;
 pub fn run(args: &[String]) -> Result<(), String> {
     let vid = parse_u16_arg(args, "--vid")?;
     let pid = parse_u16_arg(args, "--pid")?;
-    let payload = build_payload(args)?;
+    let mut payload_source = PayloadSource::from_args(args)?;
     let interval = parse_interval(args)?;
     let count = parse_count(args)?;
-
-    let packet = build_packet(&payload)?;
     let api = HidApi::new().map_err(|err| format!("Failed to initialize HID API: {err}"))?;
     let device = api
         .open(vid, pid)
         .map_err(|err| format!("Failed to open HID device {vid:#06x}:{pid:#06x}: {err}"))?;
 
-    for index in 0..count {
-        send_packet(&device, &packet)?;
-        println!(
-            "Sent {} bytes to LD device {vid:#06x}:{pid:#06x} ({}).",
-            payload.len(),
-            index + 1
-        );
-        sleep(interval);
+    match count {
+        Some(count) => {
+            for index in 0..count {
+                let payload = match payload_source.next_payload()? {
+                    Some(payload) => payload,
+                    None => return Ok(()),
+                };
+                let packet = build_packet(&payload)?;
+                send_packet(&device, &packet)?;
+                println!(
+                    "Sent {} bytes to LD device {vid:#06x}:{pid:#06x} ({}).",
+                    payload.len(),
+                    index + 1
+                );
+                sleep(interval);
+            }
+        }
+        None => loop {
+            let payload = match payload_source.next_payload()? {
+                Some(payload) => payload,
+                None => return Ok(()),
+            };
+            let packet = build_packet(&payload)?;
+            send_packet(&device, &packet)?;
+            println!("Sent {} bytes to LD device {vid:#06x}:{pid:#06x}.", payload.len());
+            sleep(interval);
+        },
     }
     Ok(())
 }
@@ -42,20 +60,60 @@ fn parse_u16_arg(args: &[String], name: &str) -> Result<u16, String> {
         .map_err(|err| format!("Invalid value for {name} ({value}): {err}"))
 }
 
-fn build_payload(args: &[String]) -> Result<Vec<u8>, String> {
-    if let Some(raw_payload) = find_arg_value(args, "--payload") {
-        return parse_payload_hex(raw_payload);
+enum PayloadSource {
+    Raw(Vec<u8>),
+    FixedMetrics {
+        temperature: f32,
+        power: f32,
+        utilization: f32,
+    },
+    Stdin(io::Stdin),
+}
+
+impl PayloadSource {
+    fn from_args(args: &[String]) -> Result<Self, String> {
+        if let Some(raw_payload) = find_arg_value(args, "--payload") {
+            return parse_payload_hex(raw_payload).map(PayloadSource::Raw);
+        }
+
+        if args.iter().any(|arg| arg == "--stdin") {
+            return Ok(PayloadSource::Stdin(io::stdin()));
+        }
+
+        let temperature = parse_f32_arg(args, "--temp")?;
+        let power = parse_f32_arg(args, "--power")?;
+        let utilization = parse_f32_arg(args, "--util")?;
+
+        Ok(PayloadSource::FixedMetrics {
+            temperature,
+            power,
+            utilization,
+        })
     }
 
-    let temperature = parse_f32_arg(args, "--temp")?;
-    let power = parse_f32_arg(args, "--power")?;
-    let utilization = parse_f32_arg(args, "--util")?;
+    fn next_payload(&mut self) -> Result<Option<Vec<u8>>, String> {
+        match self {
+            PayloadSource::Raw(payload) => Ok(Some(payload.clone())),
+            PayloadSource::FixedMetrics {
+                temperature,
+                power,
+                utilization,
+            } => Ok(Some(build_metrics_payload(
+                *temperature,
+                *power,
+                *utilization,
+            ))),
+            PayloadSource::Stdin(stdin) => read_stdin_payload(stdin),
+        }
+    }
+}
 
+fn build_metrics_payload(temperature: f32, power: f32, utilization: f32) -> Vec<u8> {
     let mut payload = Vec::with_capacity(12);
     payload.extend_from_slice(&temperature.to_le_bytes());
     payload.extend_from_slice(&power.to_le_bytes());
     payload.extend_from_slice(&utilization.to_le_bytes());
-    Ok(payload)
+    payload
 }
 
 fn parse_u16_value(value: &str) -> Result<u16, String> {
@@ -98,10 +156,10 @@ fn parse_interval(args: &[String]) -> Result<Duration, String> {
     Ok(Duration::from_millis(millis))
 }
 
-fn parse_count(args: &[String]) -> Result<usize, String> {
+fn parse_count(args: &[String]) -> Result<Option<usize>, String> {
     let value = match find_arg_value(args, "--count") {
         Some(value) => value,
-        None => return Ok(usize::MAX),
+        None => return Ok(None),
     };
 
     let count = value
@@ -110,7 +168,35 @@ fn parse_count(args: &[String]) -> Result<usize, String> {
     if count == 0 {
         return Err("Count must be greater than zero.".to_string());
     }
-    Ok(count)
+    Ok(Some(count))
+}
+
+fn read_stdin_payload(stdin: &io::Stdin) -> Result<Option<Vec<u8>>, String> {
+    let mut line = String::new();
+    let mut reader = stdin.lock();
+    let bytes = reader
+        .read_line(&mut line)
+        .map_err(|err| format!("Failed to read stdin: {err}"))?;
+    if bytes == 0 {
+        return Ok(None);
+    }
+
+    let values: Vec<f32> = line
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<f32>()
+                .map_err(|err| format!("Invalid stdin metric ({part}): {err}"))
+        })
+        .collect::<Result<Vec<f32>, String>>()?;
+
+    if values.len() != 3 {
+        return Err("stdin must provide three values: temp, power, util.".to_string());
+    }
+
+    Ok(Some(build_metrics_payload(
+        values[0], values[1], values[2],
+    )))
 }
 
 fn parse_hex_bytes(value: &str) -> Result<Vec<u8>, String> {
