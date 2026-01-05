@@ -7,16 +7,8 @@
 #include <windows.h>
 #include <Shlobj.h>
 #include <intrin.h>
-#include <chrono>
-#include <thread>
-#include <setupapi.h>
-#include <hidsdi.h>
-#include <array>
-#include <vector>
-#include <algorithm>
-#include <cmath>
-#include <cstdint>
-#include <cstring>
+#include <new>
+#include <string>
 #include "ICPUEx.h"
 #include "IPlatform.h"
 #include "IDeviceManager.h"
@@ -24,11 +16,6 @@
 
 #include "Utility.hpp"
 
-#pragma comment(lib, "Setupapi.lib")
-#pragma comment(lib, "Hid.lib")
-
-constexpr USHORT kFixedVid = 0x3633;
-constexpr USHORT kFixedPid = 0x000A;
 
 typedef IPlatform& (__stdcall* GetPlatformFunc)();
 
@@ -329,261 +316,100 @@ bool ReadCPUTelemetry(ICPUEx* cpu, double& temperatureC, double& powerW, double&
 	return true;
 }
 
-std::wstring FindHidDevicePath(USHORT vid, USHORT pid)
+enum RMMonitorStatus
 {
-	GUID hidGuid;
-	HidD_GetHidGuid(&hidGuid);
-	HDEVINFO deviceInfo = SetupDiGetClassDevs(&hidGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-	if (deviceInfo == INVALID_HANDLE_VALUE)
-	{
-		return L"";
-	}
+    RM_STATUS_OK = 0,
+    RM_STATUS_INVALID_ARG = 1,
+    RM_STATUS_NOT_ADMIN = 2,
+    RM_STATUS_UNSUPPORTED_OS = 3,
+    RM_STATUS_NOT_AMD = 4,
+    RM_STATUS_DRIVER = 5,
+    RM_STATUS_UNSUPPORTED_CPU = 6,
+    RM_STATUS_ALLOC_FAILED = 7,
+    RM_STATUS_SDK_INIT_FAILED = 8,
+    RM_STATUS_READ_FAILED = 9
+};
 
-	SP_DEVICE_INTERFACE_DATA interfaceData = {};
-	interfaceData.cbSize = sizeof(interfaceData);
+struct RMMonitorContext
+{
+    MonitoringContext ctx = {};
+};
 
-	for (DWORD index = 0; SetupDiEnumDeviceInterfaces(deviceInfo, NULL, &hidGuid, index, &interfaceData); ++index)
-	{
-		DWORD requiredSize = 0;
-		SetupDiGetDeviceInterfaceDetail(deviceInfo, &interfaceData, NULL, 0, &requiredSize, NULL);
-		if (!requiredSize)
-		{
-			continue;
-		}
+extern "C" int rm_monitor_init(RMMonitorContext** out_ctx)
+{
+    if (!out_ctx)
+    {
+        return RM_STATUS_INVALID_ARG;
+    }
 
-		std::vector<BYTE> detailBuffer(requiredSize);
-		auto detailData = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detailBuffer.data());
-		detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+    *out_ctx = nullptr;
+    if (!IsUserAnAdmin())
+    {
+        return RM_STATUS_NOT_ADMIN;
+    }
+    if (!IsSupportedOS())
+    {
+        return RM_STATUS_UNSUPPORTED_OS;
+    }
+    if (!Authentic_AMD())
+    {
+        return RM_STATUS_NOT_AMD;
+    }
+    if (QueryDrvService() < 0)
+    {
+        if (!InstallDriver())
+        {
+            return RM_STATUS_DRIVER;
+        }
+    }
+    if (!IsSupportedProcessor())
+    {
+        return RM_STATUS_UNSUPPORTED_CPU;
+    }
 
-		if (!SetupDiGetDeviceInterfaceDetail(deviceInfo, &interfaceData, detailData, requiredSize, NULL, NULL))
-		{
-			continue;
-		}
+    RMMonitorContext* wrapper = new (std::nothrow) RMMonitorContext();
+    if (!wrapper)
+    {
+        return RM_STATUS_ALLOC_FAILED;
+    }
+    if (!InitMonitoringContext(wrapper->ctx))
+    {
+        delete wrapper;
+        return RM_STATUS_SDK_INIT_FAILED;
+    }
 
-		HANDLE handle = CreateFile(detailData->DevicePath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-		if (handle == INVALID_HANDLE_VALUE)
-		{
-			continue;
-		}
-
-		HIDD_ATTRIBUTES attributes = {};
-		attributes.Size = sizeof(attributes);
-		BOOL matched = HidD_GetAttributes(handle, &attributes);
-		CloseHandle(handle);
-
-		if (matched && attributes.VendorID == vid && attributes.ProductID == pid)
-		{
-			std::wstring path(detailData->DevicePath);
-			SetupDiDestroyDeviceInfoList(deviceInfo);
-			return path;
-		}
-	}
-
-	SetupDiDestroyDeviceInfoList(deviceInfo);
-	return L"";
+    *out_ctx = wrapper;
+    return RM_STATUS_OK;
 }
 
-bool WriteHidPacket(HANDLE deviceHandle, const std::array<uint8_t, 64>& payload)
+extern "C" int rm_monitor_read(RMMonitorContext* ctx, double* temperatureC, double* powerW, double* usagePercent)
 {
-	DWORD bytesWritten = 0;
-	BOOL status = WriteFile(deviceHandle, payload.data(), static_cast<DWORD>(payload.size()), &bytesWritten, NULL);
-	if (!status || bytesWritten != payload.size())
-	{
-		return false;
-	}
-	return true;
+    if (!ctx || !temperatureC || !powerW || !usagePercent)
+    {
+        return RM_STATUS_INVALID_ARG;
+    }
+
+    double temp = 0.0;
+    double power = 0.0;
+    double usage = 0.0;
+    if (!ReadCPUTelemetry(ctx->ctx.cpu, temp, power, usage))
+    {
+        return RM_STATUS_READ_FAILED;
+    }
+
+    *temperatureC = temp;
+    *powerW = power;
+    *usagePercent = usage;
+    return RM_STATUS_OK;
 }
 
-bool InitUsbDevice(HANDLE& deviceHandle)
+extern "C" void rm_monitor_shutdown(RMMonitorContext* ctx)
 {
-	deviceHandle = INVALID_HANDLE_VALUE;
-	std::wstring devicePath = FindHidDevicePath(kFixedVid, kFixedPid);
-	if (devicePath.empty())
-	{
-		return false;
-	}
+    if (!ctx)
+    {
+        return;
+    }
 
-	deviceHandle = CreateFile(devicePath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (deviceHandle == INVALID_HANDLE_VALUE)
-	{
-		return false;
-	}
-
-	std::array<uint8_t, 64> packet = {};
-	packet[0] = 16;
-	packet[1] = 104;
-	packet[2] = 1;
-	packet[3] = 1;
-
-	std::array<uint8_t, 64> initPacket = packet;
-	initPacket[4] = 2;
-	initPacket[5] = 3;
-	initPacket[6] = 1;
-	initPacket[7] = 112;
-	initPacket[8] = 22;
-	if (!WriteHidPacket(deviceHandle, initPacket))
-	{
-		CloseHandle(deviceHandle);
-		deviceHandle = INVALID_HANDLE_VALUE;
-		return false;
-	}
-
-	initPacket[5] = 2;
-	initPacket[7] = 111;
-	if (!WriteHidPacket(deviceHandle, initPacket))
-	{
-		CloseHandle(deviceHandle);
-		deviceHandle = INVALID_HANDLE_VALUE;
-		return false;
-	}
-
-	return true;
-}
-
-bool SendUsbStatusPacket(HANDLE deviceHandle, int temperatureC, int powerW, int usagePercent)
-{
-	std::array<uint8_t, 64> packet = {};
-	packet[0] = 16;
-	packet[1] = 104;
-	packet[2] = 1;
-	packet[3] = 1;
-	packet[4] = 11;
-	packet[5] = 1;
-	packet[6] = 2;
-	packet[7] = 5;
-
-	uint16_t powerInt = static_cast<uint16_t>(std::clamp(powerW, 0, 65535));
-	packet[8] = static_cast<uint8_t>(powerInt >> 8);
-	packet[9] = static_cast<uint8_t>(powerInt & 0xFF);
-
-	packet[10] = 0;
-	uint32_t tempBits = 0;
-	float tempValue = static_cast<float>(temperatureC);
-	std::memcpy(&tempBits, &tempValue, sizeof(tempBits));
-	packet[11] = static_cast<uint8_t>((tempBits >> 24) & 0xFF);
-	packet[12] = static_cast<uint8_t>((tempBits >> 16) & 0xFF);
-	packet[13] = static_cast<uint8_t>((tempBits >> 8) & 0xFF);
-	packet[14] = static_cast<uint8_t>(tempBits & 0xFF);
-
-	uint8_t utilization = static_cast<uint8_t>(std::clamp(usagePercent, 0, 100));
-	packet[15] = utilization;
-
-	uint16_t checksum = 0;
-	for (size_t i = 1; i <= 15; ++i)
-	{
-		checksum += packet[i];
-	}
-	packet[16] = static_cast<uint8_t>(checksum % 256);
-	packet[17] = 22;
-
-	return WriteHidPacket(deviceHandle, packet);
-}
-
-void StreamToConsoleAndUsb()
-{
-	MonitoringContext ctx;
-	if (!InitMonitoringContext(ctx))
-	{
-		return;
-	}
-
-	HANDLE usbHandle = INVALID_HANDLE_VALUE;
-	bool usbReady = InitUsbDevice(usbHandle);
-	while (true)
-	{
-		double temperatureC = 0.0;
-		double powerW = 0.0;
-		double usagePercent = 0.0;
-
-		auto tryReadTelemetry = [&](int maxAttempts) -> bool
-		{
-			for (int attempt = 1; attempt <= maxAttempts; ++attempt)
-			{
-				if (ReadCPUTelemetry(ctx.cpu, temperatureC, powerW, usagePercent))
-				{
-					if (attempt > 1)
-					{
-					}
-					return true;
-				}
-
-				if (attempt < maxAttempts)
-				{
-					std::this_thread::sleep_for(std::chrono::seconds(1));
-				}
-			}
-			return false;
-		};
-
-		bool telemetryOk = tryReadTelemetry(10);
-		if (!telemetryOk)
-		{
-			std::this_thread::sleep_for(std::chrono::minutes(1));
-
-			telemetryOk = tryReadTelemetry(10);
-			if (!telemetryOk)
-			{
-				break;
-			}
-		}
-
-		int tempRounded = static_cast<int>(std::lround(temperatureC));
-		int powerRounded = static_cast<int>(std::lround(powerW));
-		int usageRounded = static_cast<int>(std::lround(usagePercent));
-
-		if (usbReady)
-		{
-			if (!SendUsbStatusPacket(usbHandle, tempRounded, powerRounded, usageRounded))
-			{
-				CloseHandle(usbHandle);
-				usbHandle = INVALID_HANDLE_VALUE;
-				usbReady = false;
-			}
-		}
-
-		std::this_thread::sleep_for(std::chrono::seconds(1));
-	}
-
-	if (usbHandle != INVALID_HANDLE_VALUE)
-	{
-		CloseHandle(usbHandle);
-	}
-	CleanupMonitoringContext(ctx);
-}
-
-extern "C" int run_sample_app(int argc, CHAR **argv)
-{
-	(void)argc;
-	(void)argv;
-	//Check if application running with admin privileged or not
-	if (!IsUserAnAdmin())
-	{
-		MessageBox(NULL, _T("Access Denied : Run application with Admin rights"), TEXT("Error"), MB_OK);
-		ShowError(_T("User is not admin..."), FALSE, 1);
-	}
-	//Check for OS support
-	if (!IsSupportedOS())
-	{
-		ShowError(_T("This Desktop application requires OS version greater than or equals to Windows 10."), FALSE, 1);
-	}
-	//Check if we have AMD processor
-	if (!Authentic_AMD())
-		ShowError(_T("No AMD Processor is found!"), FALSE, 1);
-
-	//Check if driver is installed or not
-	if (QueryDrvService() < 0)
-	{
-		if (false == InstallDriver())
-			ShowError(_T("Unable to install driver AMDRyzenMasterDriver.sys : Driver not found!"), FALSE, 1);
-	}
-
-	//Check if application is running on supported Processor?
-	if (!IsSupportedProcessor())
-	{
-		ShowError(_T("Not Supported Processor!"), FALSE, 1);
-	}
-	
-	StreamToConsoleAndUsb();
-
-	return 0;
+    CleanupMonitoringContext(ctx->ctx);
+    delete ctx;
 }

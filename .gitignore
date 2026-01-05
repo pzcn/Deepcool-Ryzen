@@ -1,0 +1,35 @@
+# Build artifacts
+**/target/
+bin/
+obj/
+x64/
+Debug/
+Release/
+**/*.rs.bk
+**/*.rlib
+**/*.rmeta
+**/*.d
+**/*.o
+**/*.a
+**/*.so
+**/*.dylib
+*.obj
+*.pdb
+*.ilk
+*.ipdb
+*.iobj
+*.idb
+*.exe
+*.dll
+*.lib
+*.exp
+*.tlog
+*.log
+
+# Visual Studio
+/.vs/
+*.suo
+*.user
+*.vcxproj.user
+*.VC.db
+*.VC.opendb
