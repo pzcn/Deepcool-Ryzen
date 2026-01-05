@@ -1,4 +1,6 @@
 use hidapi::{HidApi, HidDevice};
+use std::thread::sleep;
+use std::time::Duration;
 
 const LD_REPORT_ID: u8 = 0x00;
 const LD_REPORT_SIZE: usize = 64;
@@ -8,6 +10,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let vid = parse_u16_arg(args, "--vid")?;
     let pid = parse_u16_arg(args, "--pid")?;
     let payload = build_payload(args)?;
+    let interval = parse_interval(args)?;
+    let count = parse_count(args)?;
 
     let packet = build_packet(&payload)?;
     let api = HidApi::new().map_err(|err| format!("Failed to initialize HID API: {err}"))?;
@@ -15,11 +19,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .open(vid, pid)
         .map_err(|err| format!("Failed to open HID device {vid:#06x}:{pid:#06x}: {err}"))?;
 
-    send_packet(&device, &packet)?;
-    println!(
-        "Sent {} bytes to LD device {vid:#06x}:{pid:#06x}.",
-        payload.len(),
-    );
+    for index in 0..count {
+        send_packet(&device, &packet)?;
+        println!(
+            "Sent {} bytes to LD device {vid:#06x}:{pid:#06x} ({}).",
+            payload.len(),
+            index + 1
+        );
+        sleep(interval);
+    }
     Ok(())
 }
 
@@ -73,6 +81,36 @@ fn find_arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         .position(|arg| arg == name)
         .and_then(|idx| args.get(idx + 1))
         .map(String::as_str)
+}
+
+fn parse_interval(args: &[String]) -> Result<Duration, String> {
+    let value = match find_arg_value(args, "--interval-ms") {
+        Some(value) => value,
+        None => return Ok(Duration::from_secs(1)),
+    };
+
+    let millis = value
+        .parse::<u64>()
+        .map_err(|err| format!("Invalid value for --interval-ms ({value}): {err}"))?;
+    if millis == 0 {
+        return Err("Interval must be greater than zero.".to_string());
+    }
+    Ok(Duration::from_millis(millis))
+}
+
+fn parse_count(args: &[String]) -> Result<usize, String> {
+    let value = match find_arg_value(args, "--count") {
+        Some(value) => value,
+        None => return Ok(usize::MAX),
+    };
+
+    let count = value
+        .parse::<usize>()
+        .map_err(|err| format!("Invalid value for --count ({value}): {err}"))?;
+    if count == 0 {
+        return Err("Count must be greater than zero.".to_string());
+    }
+    Ok(count)
 }
 
 fn parse_hex_bytes(value: &str) -> Result<Vec<u8>, String> {
