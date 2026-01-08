@@ -87,14 +87,14 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>false</LinkIncremental>
     <TargetName>$(ProjectName)D</TargetName>
-    <IncludePath>$(VC_IncludePath);$(AMDRMMONITORSDKPATH)\include;$(WindowsSDK_IncludePath);$(SolutionDir)/inc</IncludePath>
+    <IncludePath>$(VC_IncludePath);$(SolutionDir)/third_party/amd_ryzen_master_sdk/include;$(WindowsSDK_IncludePath);$(SolutionDir)/inc</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>$(VC_IncludePath);$(AMDRMMONITORSDKPATH)\include;$(WindowsSDK_IncludePath);$(SolutionDir)/inc</IncludePath>
+    <IncludePath>$(VC_IncludePath);$(SolutionDir)/third_party/amd_ryzen_master_sdk/include;$(WindowsSDK_IncludePath);$(SolutionDir)/inc</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>

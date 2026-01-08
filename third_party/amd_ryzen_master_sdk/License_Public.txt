@@ -1,0 +1,11 @@
+RYZEN MASTER UTILITY SDK
+Copyright Advanced Micro Devices, Inc. All Rights Reserved.
+
+
+You may not use this software and documentation (if any) (collectively, the “Materials”) except in compliance with the terms and conditions of the Ryzen Master Utility Software Development Kit(s) License Agreement signed by you and an authorized signatory of AMD ("Agreement").  IF YOU DO NOT HAVE A COPY OF THE AGREEMENT, CONTACT YOUR AMD REPRESENTATIVE FOR A COPY. 
+
+
+You agree that you will not reverse engineer or decompile the Materials, in whole or in part, except as allowed by applicable law. Furthermore, you will not distribute the Materials except as expressly authorized by the Agreement.
+
+
+THE MATERIALS ARE DISTRIBUTED ON AN “AS IS” BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED. AMD AND ITS LICENSORS WILL NOT, UNDER ANY CIRCUMSTANCES BE LIABLE TO YOU FOR ANY PUNITIVE, DIRECT, INCIDENTAL, INDIRECT, SPECIAL, OR CONSEQUENTIAL DAMAGES ARISING FROM USE OF THE MATERIALS EVEN IF AMD AND ITS LICENSORS HAVE BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.

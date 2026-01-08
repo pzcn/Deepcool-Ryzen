@@ -56,6 +56,7 @@ mod windows_app {
     const RM_STATUS_ALLOC_FAILED: i32 = 7;
     const RM_STATUS_SDK_INIT_FAILED: i32 = 8;
     const RM_STATUS_READ_FAILED: i32 = 9;
+    const TELEMETRY_INTERVAL: Duration = Duration::from_millis(1200);
 
     static mut SERVICE_HANDLE: SERVICE_STATUS_HANDLE = SERVICE_STATUS_HANDLE(ptr::null_mut());
     static mut SERVICE_STOP_EVENT: HANDLE = HANDLE(ptr::null_mut());
@@ -284,7 +285,7 @@ mod windows_app {
                 }
             }
 
-            if wait_or_stop(stop_event, Duration::from_secs(1)) {
+            if wait_or_stop(stop_event, TELEMETRY_INTERVAL) {
                 break;
             }
         }
@@ -684,7 +685,7 @@ mod windows_app {
                 }
             }
             if attempt < max_attempts {
-                if wait_or_stop(stop_event, Duration::from_secs(1)) {
+                if wait_or_stop(stop_event, TELEMETRY_INTERVAL) {
                     return Err(last_status);
                 }
             }

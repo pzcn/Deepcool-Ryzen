@@ -14,6 +14,9 @@
 #include <process.h>
 #endif
 #define DRIVER_FILE_PATH_64	L"bin\\AMDRyzenMasterDriver.sys"
+#ifndef RM_DRIVER_NAME
+#define RM_DRIVER_NAME		L"AMDRyzenMasterDriverV29"
+#endif
 #define AMDRM_Monitoring_SDK_REGISTRY_PATH	L"Software\\AMD\\RyzenMasterMonitoringSDK"
 #define MS_OS_Version_REGISTRY_PATH	L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
 
