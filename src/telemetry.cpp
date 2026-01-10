@@ -6,6 +6,8 @@
 #include <windows.h>
 #include <Shlobj.h>
 #include <intrin.h>
+#include <algorithm>
+#include <cmath>
 #include <new>
 #include <string>
 #include "ICPUEx.h"
@@ -44,6 +46,65 @@ struct MonitoringContext
 	IBIOSEx* bios = nullptr;
 	bool platformInitialized = false;
 };
+
+template <typename FreqData>
+const double* GetCurrentFreqPtr(const FreqData& data)
+{
+	if constexpr (requires { data.dCurrentFreq; })
+	{
+		return data.dCurrentFreq;
+	}
+	else if constexpr (requires { data.dFreq; })
+	{
+		return data.dFreq;
+	}
+	else
+	{
+		return nullptr;
+	}
+}
+
+template <typename FreqData>
+const double* GetCurrentTempPtr(const FreqData& data)
+{
+	if constexpr (requires { data.dCurrentTemp; })
+	{
+		return data.dCurrentTemp;
+	}
+	else
+	{
+		return nullptr;
+	}
+}
+
+template <typename FreqData>
+bool GetResidencyPercent(const FreqData& data, unsigned int idx, double& out_percent)
+{
+	if constexpr (requires { data.dState; })
+	{
+		if (!data.dState)
+		{
+			return false;
+		}
+		out_percent = data.dState[idx];
+		return true;
+	}
+	else if constexpr (requires { data.bState; })
+	{
+		if (!data.bState)
+		{
+			return false;
+		}
+		out_percent = data.bState[idx] ? 100.0 : 0.0;
+		return true;
+	}
+	else
+	{
+		(void)idx;
+		(void)out_percent;
+		return false;
+	}
+}
 
 static bool TryLoadPlatformFromFile(MonitoringContext& ctx, const std::wstring& dllPath)
 {
@@ -324,21 +385,73 @@ bool ReadCPUTelemetry(ICPUEx* cpu, double& temperatureC, double& powerW, double&
 
 	double occupancy_sum = 0.0;
 	unsigned int occupancy_count = 0;
-	if (stData.stFreqData.dState && stData.stFreqData.uLength && stData.stFreqData.dCurrentFreq)
+	double max_residency = 0.0;
+	const double* freq_ptr = GetCurrentFreqPtr(stData.stFreqData);
+	if (stData.stFreqData.uLength)
 	{
 		for (unsigned int i = 0; i < stData.stFreqData.uLength; ++i)
 		{
-			if (stData.stFreqData.dCurrentFreq[i] != 0)
+			if (!freq_ptr || freq_ptr[i] != 0)
 			{
-				occupancy_sum += stData.stFreqData.dState[i];
-				occupancy_count++;
+				double residency = 0.0;
+				if (GetResidencyPercent(stData.stFreqData, i, residency))
+				{
+					occupancy_sum += residency;
+					occupancy_count++;
+					max_residency = std::max(max_residency, residency);
+				}
 			}
 		}
 	}
 
 	usagePercent = occupancy_count ? (occupancy_sum / occupancy_count) : 0.0;
+	if (max_residency > 0.0 && max_residency <= 1.0)
+	{
+		usagePercent *= 100.0;
+	}
+
 	temperatureC = stData.dTemperature;
+	if ((!std::isfinite(temperatureC) || temperatureC <= 0.0) && stData.stFreqData.uLength)
+	{
+		const double* temp_ptr = GetCurrentTempPtr(stData.stFreqData);
+		if (temp_ptr)
+		{
+			double max_temp = 0.0;
+			for (unsigned int i = 0; i < stData.stFreqData.uLength; ++i)
+			{
+				if (temp_ptr[i] > max_temp)
+				{
+					max_temp = temp_ptr[i];
+				}
+			}
+			if (max_temp > 0.0)
+			{
+				temperatureC = max_temp;
+			}
+		}
+	}
+
 	powerW = stData.fPPTValue;
+	if (!std::isfinite(powerW) || powerW <= 0.0)
+	{
+		double alt_power = 0.0;
+		if (std::isfinite(stData.fVDDCR_VDD_Power) && stData.fVDDCR_VDD_Power > 0.0f)
+		{
+			alt_power += stData.fVDDCR_VDD_Power;
+		}
+		if (std::isfinite(stData.fVDDCR_SOC_Power) && stData.fVDDCR_SOC_Power > 0.0f)
+		{
+			alt_power += stData.fVDDCR_SOC_Power;
+		}
+		if (alt_power > 0.0)
+		{
+			powerW = alt_power;
+		}
+	}
+	if (!std::isfinite(powerW) || powerW < 0.0)
+	{
+		powerW = 0.0;
+	}
 	return true;
 }
 
