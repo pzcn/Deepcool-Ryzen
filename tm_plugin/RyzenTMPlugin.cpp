@@ -14,14 +14,23 @@ void rm_monitor_set_sdk_path(const wchar_t* path);
 int rm_monitor_init(RMMonitorContext** out_ctx);
 int rm_monitor_read(RMMonitorContext* ctx, double* temperatureC, double* powerW, double* usagePercent);
 void rm_monitor_shutdown(RMMonitorContext* ctx);
+int rm_ipc_publish(double temperatureC, double powerW, double usagePercent, int status);
+int rm_ipc_read(double* temperatureC, double* powerW, double* usagePercent, int* status, unsigned int max_age_ms);
+int rm_ipc_is_service_running();
+int rm_ipc_owner_try_acquire();
+void rm_ipc_owner_release();
 }
 
 namespace {
 
 constexpr int kStatusOk = 0;
+constexpr int kIpcOk = 0;
 constexpr ULONGLONG kInitRetryMs = 10000;
+constexpr unsigned int kIpcMaxAgeMs = 4000;
+constexpr ULONGLONG kCacheGraceMs = 5000;
 constexpr wchar_t kNotAvailableText[] = L"N/A";
 constexpr wchar_t kUnavailableTooltip[] = L"Ryzen SDK unavailable";
+constexpr wchar_t kWaitingForServiceTooltip[] = L"Waiting for service data";
 
 enum class ItemIndex {
     Temp = 0,
@@ -56,17 +65,6 @@ bool HasPlatformDll(const std::wstring& root) {
            FileExists(JoinPath(root, L"bin\\Platform.dll"));
 }
 
-std::wstring GetEnvVar(const wchar_t* name) {
-    DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
-    if (needed == 0) {
-        return L"";
-    }
-    std::wstring value(needed, L'\0');
-    DWORD written = GetEnvironmentVariableW(name, value.data(), needed);
-    value.resize(written);
-    return value;
-}
-
 std::wstring GetModuleDirectory() {
     HMODULE module = nullptr;
     if (!GetModuleHandleExW(
@@ -90,6 +88,38 @@ std::wstring GetModuleDirectory() {
     return full.substr(0, pos);
 }
 
+std::wstring GetProcessDirectory() {
+    wchar_t path[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(_countof(path)));
+    if (len == 0 || len >= _countof(path)) {
+        return L"";
+    }
+
+    std::wstring full(path, len);
+    size_t pos = full.find_last_of(L"\\/");
+    if (pos == std::wstring::npos) {
+        return L"";
+    }
+    return full.substr(0, pos);
+}
+
+std::wstring GetTempSdkRoot() {
+    wchar_t temp_path[MAX_PATH] = {};
+    DWORD len = GetTempPathW(static_cast<DWORD>(_countof(temp_path)), temp_path);
+    if (len == 0 || len >= _countof(temp_path)) {
+        return L"";
+    }
+    std::wstring root(temp_path, len);
+    if (!root.empty() && root.back() != L'\\' && root.back() != L'/') {
+        root.push_back(L'\\');
+    }
+    root.append(L"ryzenmaster-monitor");
+    if (HasPlatformDll(root)) {
+        return root;
+    }
+    return L"";
+}
+
 std::wstring ResolveSdkRoot() {
     const std::wstring module_dir = GetModuleDirectory();
     if (!module_dir.empty()) {
@@ -102,13 +132,20 @@ std::wstring ResolveSdkRoot() {
         }
     }
 
-    std::wstring env = GetEnvVar(L"AMDRMSDKPATH");
-    if (!env.empty() && HasPlatformDll(env)) {
-        return env;
+    const std::wstring process_dir = GetProcessDirectory();
+    if (!process_dir.empty()) {
+        std::wstring bundled = JoinPath(process_dir, L"RyzenSDK");
+        if (HasPlatformDll(bundled)) {
+            return bundled;
+        }
+        if (HasPlatformDll(process_dir)) {
+            return process_dir;
+        }
     }
-    env = GetEnvVar(L"AMDRMMONITORSDKPATH");
-    if (!env.empty() && HasPlatformDll(env)) {
-        return env;
+
+    std::wstring temp_root = GetTempSdkRoot();
+    if (!temp_root.empty()) {
+        return temp_root;
     }
 
     return L"";
@@ -156,11 +193,11 @@ const wchar_t* ItemLabel(ItemIndex index) {
 const wchar_t* ItemSample(ItemIndex index) {
     switch (index) {
     case ItemIndex::Temp:
-        return L"100C";
+        return L"100 \u2103";
     case ItemIndex::Usage:
-        return L"100%";
+        return L"100 %";
     case ItemIndex::Power:
-        return L"200W";
+        return L"200 W";
     default:
         return L"0";
     }
@@ -201,21 +238,61 @@ public:
     }
 
     void DataRequired() override {
-        if (!EnsureInitialized()) {
-            SetUnavailable(kUnavailableTooltip);
-            return;
-        }
-
         double temp = 0.0;
         double power = 0.0;
         double usage = 0.0;
-        int status = rm_monitor_read(ctx_, &temp, &power, &usage);
-        if (status != kStatusOk) {
-            ShutdownContext();
+        if (rm_ipc_is_service_running() != 0) {
+            if (owns_sdk_) {
+                ReleaseSdkOwnership();
+            }
+            if (TryReadIpc(temp, power, usage)) {
+                UpdateValues(temp, power, usage);
+                tooltip_.clear();
+                return;
+            }
+            if (UseCachedValuesIfFresh(kCacheGraceMs, kWaitingForServiceTooltip)) {
+                return;
+            }
             SetUnavailable(kUnavailableTooltip);
             return;
         }
 
+        if (!owns_sdk_) {
+            if (TryReadIpc(temp, power, usage)) {
+                UpdateValues(temp, power, usage);
+                tooltip_.clear();
+                return;
+            }
+            if (rm_ipc_owner_try_acquire() == 0) {
+                if (UseCachedValuesIfFresh(kCacheGraceMs, kUnavailableTooltip)) {
+                    return;
+                }
+                SetUnavailable(kUnavailableTooltip);
+                return;
+            }
+            owns_sdk_ = true;
+        }
+
+        if (!EnsureInitialized()) {
+            ReleaseSdkOwnership();
+            if (UseCachedValuesIfFresh(kCacheGraceMs, kUnavailableTooltip)) {
+                return;
+            }
+            SetUnavailable(kUnavailableTooltip);
+            return;
+        }
+
+        int status = rm_monitor_read(ctx_, &temp, &power, &usage);
+        if (status != kStatusOk) {
+            ReleaseSdkOwnership();
+            if (UseCachedValuesIfFresh(kCacheGraceMs, kUnavailableTooltip)) {
+                return;
+            }
+            SetUnavailable(kUnavailableTooltip);
+            return;
+        }
+
+        rm_ipc_publish(temp, power, usage, status);
         UpdateValues(temp, power, usage);
         tooltip_.clear();
     }
@@ -255,7 +332,7 @@ private:
         SetUnavailable(L"");
     }
 
-    ~RyzenMonitorPlugin() { ShutdownContext(); }
+    ~RyzenMonitorPlugin() { ReleaseSdkOwnership(); }
 
     bool EnsureInitialized() {
         if (ctx_) {
@@ -286,10 +363,43 @@ private:
         return true;
     }
 
+    bool TryReadIpc(double& temp, double& power, double& usage) {
+        int status = kStatusOk;
+        int result = rm_ipc_read(&temp, &power, &usage, &status, kIpcMaxAgeMs);
+        if (result != kIpcOk || status != kStatusOk) {
+            return false;
+        }
+        return true;
+    }
+
+    bool UseCachedValuesIfFresh(ULONGLONG max_age_ms, const wchar_t* tooltip) {
+        if (!has_cache_) {
+            return false;
+        }
+        ULONGLONG now = GetTickCount64();
+        if (now < last_update_ms_ || now - last_update_ms_ > max_age_ms) {
+            return false;
+        }
+        if (tooltip) {
+            tooltip_.assign(tooltip);
+        } else {
+            tooltip_.clear();
+        }
+        return true;
+    }
+
     void ShutdownContext() {
         if (ctx_) {
             rm_monitor_shutdown(ctx_);
             ctx_ = nullptr;
+        }
+    }
+
+    void ReleaseSdkOwnership() {
+        if (owns_sdk_) {
+            ShutdownContext();
+            rm_ipc_owner_release();
+            owns_sdk_ = false;
         }
     }
 
@@ -306,14 +416,17 @@ private:
 
     void UpdateValues(double temp, double power, double usage) {
         std::array<wchar_t, 32> buffer{};
-        swprintf_s(buffer.data(), buffer.size(), L"%.0fC", temp);
+        swprintf_s(buffer.data(), buffer.size(), L"%.0f \u2103", temp);
         values_[ToIndex(ItemIndex::Temp)] = buffer.data();
 
-        swprintf_s(buffer.data(), buffer.size(), L"%.0f%%", usage);
+        swprintf_s(buffer.data(), buffer.size(), L"%.0f %%", usage);
         values_[ToIndex(ItemIndex::Usage)] = buffer.data();
 
-        swprintf_s(buffer.data(), buffer.size(), L"%.0fW", power);
+        swprintf_s(buffer.data(), buffer.size(), L"%.0f W", power);
         values_[ToIndex(ItemIndex::Power)] = buffer.data();
+
+        has_cache_ = true;
+        last_update_ms_ = GetTickCount64();
     }
 
     std::array<RyzenItem, static_cast<size_t>(ItemIndex::Count)> items_;
@@ -322,6 +435,9 @@ private:
     RMMonitorContext* ctx_ = nullptr;
     ULONGLONG last_init_attempt_ = 0;
     int last_status_ = kStatusOk;
+    bool owns_sdk_ = false;
+    bool has_cache_ = false;
+    ULONGLONG last_update_ms_ = 0;
 };
 
 const wchar_t* RyzenItem::GetItemValueText() const {

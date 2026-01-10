@@ -57,6 +57,7 @@ mod windows_app {
     const RM_STATUS_SDK_INIT_FAILED: i32 = 8;
     const RM_STATUS_READ_FAILED: i32 = 9;
     const TELEMETRY_INTERVAL: Duration = Duration::from_millis(1200);
+    const IPC_OK: i32 = 0;
 
     static mut SERVICE_HANDLE: SERVICE_STATUS_HANDLE = SERVICE_STATUS_HANDLE(ptr::null_mut());
     static mut SERVICE_STOP_EVENT: HANDLE = HANDLE(ptr::null_mut());
@@ -76,6 +77,23 @@ mod windows_app {
             usage_percent: *mut c_double,
         ) -> c_int;
         fn rm_monitor_shutdown(ctx: *mut RMMonitorContext);
+        fn rm_ipc_publish(
+            temp_c: c_double,
+            power_w: c_double,
+            usage_percent: c_double,
+            status: c_int,
+        ) -> c_int;
+        fn rm_ipc_read(
+            temp_c: *mut c_double,
+            power_w: *mut c_double,
+            usage_percent: *mut c_double,
+            status: *mut c_int,
+            max_age_ms: u32,
+        ) -> c_int;
+        fn rm_ipc_service_start() -> c_int;
+        fn rm_ipc_service_stop();
+        fn rm_ipc_owner_try_acquire() -> c_int;
+        fn rm_ipc_owner_release();
     }
 
     struct MonitorContext(*mut RMMonitorContext);
@@ -104,6 +122,17 @@ mod windows_app {
                 if !self.0.is_invalid() {
                     let _ = CloseHandle(self.0);
                 }
+            }
+        }
+    }
+
+    struct IpcServiceGuard;
+
+    impl Drop for IpcServiceGuard {
+        fn drop(&mut self) {
+            unsafe {
+                rm_ipc_owner_release();
+                rm_ipc_service_stop();
             }
         }
     }
@@ -202,20 +231,15 @@ mod windows_app {
         }
         println!("ryzenmaster-monitor: starting");
 
-        let mut raw_ctx: *mut RMMonitorContext = ptr::null_mut();
-        let status = unsafe { rm_monitor_init(&mut raw_ctx) };
-        if status != RM_STATUS_OK {
-            let message = format!(
-                "ryzenmaster-monitor: telemetry init failed: {} ({})",
-                status_message(status),
-                status
-            );
-            eprintln!("{message}");
-            return 1;
+        unsafe {
+            if rm_ipc_service_start() == 0 {
+                eprintln!("ryzenmaster-monitor: failed to create IPC service marker");
+            }
         }
+        let _ipc_guard = IpcServiceGuard;
 
-        let ctx = MonitorContext(raw_ctx);
-        println!("ryzenmaster-monitor: telemetry ready");
+        let mut ctx: Option<MonitorContext> = None;
+        let mut owns_sdk = false;
 
         let mut hid = match open_hid_device(K_FIXED_VID, K_FIXED_PID) {
             Some(handle) => {
@@ -241,35 +265,73 @@ mod windows_app {
                 break;
             }
 
-            let telemetry = match read_telemetry_with_retries(ctx.ptr(), 10, stop_event) {
-                Ok(values) => values,
-                Err(status) => {
-                    if stop_requested(stop_event) {
-                        break;
-                    }
-                    let message = format!(
-                        "ryzenmaster-monitor: telemetry read failed: {} ({})",
-                        status_message(status),
-                        status
-                    );
-                    eprintln!("{message}");
-                    if wait_or_stop(stop_event, Duration::from_secs(60)) {
-                        break;
-                    }
-                    match read_telemetry_with_retries(ctx.ptr(), 10, stop_event) {
-                        Ok(values) => values,
-                        Err(status) => {
-                            if stop_requested(stop_event) {
-                                break;
-                            }
-                            let message = format!(
-                                "ryzenmaster-monitor: telemetry read failed after retry: {} ({})",
-                                status_message(status),
-                                status
-                            );
-                            eprintln!("{message}");
-                            return 1;
+            if !owns_sdk {
+                let acquired = unsafe { rm_ipc_owner_try_acquire() != 0 };
+                if acquired {
+                    let mut raw_ctx: *mut RMMonitorContext = ptr::null_mut();
+                    let status = unsafe { rm_monitor_init(&mut raw_ctx) };
+                    if status == RM_STATUS_OK {
+                        ctx = Some(MonitorContext(raw_ctx));
+                        owns_sdk = true;
+                        println!("ryzenmaster-monitor: telemetry ready");
+                    } else {
+                        unsafe { rm_ipc_owner_release() };
+                        let message = format!(
+                            "ryzenmaster-monitor: telemetry init failed: {} ({})",
+                            status_message(status),
+                            status
+                        );
+                        eprintln!("{message}");
+                        if wait_or_stop(stop_event, Duration::from_secs(2)) {
+                            break;
                         }
+                        continue;
+                    }
+                }
+            }
+
+            let telemetry = if owns_sdk {
+                let ctx_ref = match ctx.as_ref() {
+                    Some(value) => value,
+                    None => {
+                        owns_sdk = false;
+                        continue;
+                    }
+                };
+                match read_telemetry_with_retries(ctx_ref.ptr(), 10, stop_event) {
+                    Ok(values) => {
+                        unsafe {
+                            rm_ipc_publish(values.0, values.1, values.2, RM_STATUS_OK);
+                        }
+                        values
+                    }
+                    Err(status) => {
+                        if stop_requested(stop_event) {
+                            break;
+                        }
+                        let message = format!(
+                            "ryzenmaster-monitor: telemetry read failed: {} ({})",
+                            status_message(status),
+                            status
+                        );
+                        eprintln!("{message}");
+                        unsafe {
+                            rm_ipc_publish(0.0, 0.0, 0.0, status);
+                        }
+                        if wait_or_stop(stop_event, Duration::from_secs(60)) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                match read_ipc_telemetry(ipc_max_age_ms()) {
+                    Some(values) => values,
+                    None => {
+                        if wait_or_stop(stop_event, TELEMETRY_INTERVAL) {
+                            break;
+                        }
+                        continue;
                     }
                 }
             };
@@ -691,6 +753,23 @@ mod windows_app {
             }
         }
         Err(last_status)
+    }
+
+    fn ipc_max_age_ms() -> u32 {
+        let base = TELEMETRY_INTERVAL.as_millis().min(u32::MAX as u128) as u32;
+        base.saturating_mul(3).saturating_add(200)
+    }
+
+    fn read_ipc_telemetry(max_age_ms: u32) -> Option<(f64, f64, f64)> {
+        let mut temperature = 0.0;
+        let mut power = 0.0;
+        let mut usage = 0.0;
+        let mut status = RM_STATUS_OK;
+        let result = unsafe { rm_ipc_read(&mut temperature, &mut power, &mut usage, &mut status, max_age_ms) };
+        if result != IPC_OK || status != RM_STATUS_OK {
+            return None;
+        }
+        Some((temperature, power, usage))
     }
 
     fn open_hid_device(vid: u16, pid: u16) -> Option<HidHandle> {

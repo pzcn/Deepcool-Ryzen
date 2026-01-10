@@ -130,6 +130,18 @@ fn main() {
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
     let repo_root = manifest_dir.join("..");
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo_root.join("src").join("telemetry.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo_root.join("src").join("Utility.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo_root.join("inc").join("Utility.hpp").display()
+    );
     let local_sdk_include = repo_root.join("third_party").join("amd_ryzen_master_sdk").join("include");
     if !local_sdk_include.join("ICPUEx.h").exists() {
         panic!(

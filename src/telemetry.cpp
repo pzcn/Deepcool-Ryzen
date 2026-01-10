@@ -7,6 +7,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <sddl.h>
 #include <Shlobj.h>
 #include <intrin.h>
 #include <algorithm>
@@ -559,4 +560,308 @@ extern "C" void rm_monitor_shutdown(RMMonitorContext* ctx)
 
     CleanupMonitoringContext(ctx->ctx);
     delete ctx;
+}
+
+namespace {
+
+constexpr uint32_t kIpcVersion = 1;
+constexpr wchar_t kIpcMapName[] = L"Global\\RyzenTelemetryShared";
+constexpr wchar_t kIpcOwnerMutexName[] = L"Global\\RyzenTelemetryOwner";
+constexpr wchar_t kIpcServiceEventName[] = L"Global\\RyzenTelemetryService";
+constexpr wchar_t kIpcSecurityDescriptor[] = L"D:(A;;GA;;;WD)";
+
+enum IpcResult
+{
+    IPC_OK = 0,
+    IPC_NOT_READY = 1,
+    IPC_STALE = 2,
+    IPC_ERROR = 3
+};
+
+struct RMSharedTelemetry
+{
+    uint32_t version;
+    uint32_t size;
+    volatile LONG seq;
+    uint32_t status;
+    uint32_t reserved;
+    ULONGLONG timestamp_ms;
+    double temperature_c;
+    double power_w;
+    double usage_percent;
+    uint32_t writer_pid;
+    uint32_t reserved2;
+};
+
+static HANDLE g_ipc_service_event = nullptr;
+static HANDLE g_ipc_owner_mutex = nullptr;
+static bool g_ipc_owner_held = false;
+
+class SecurityAttributesHolder
+{
+public:
+    SecurityAttributesHolder()
+    {
+        attrs_.nLength = sizeof(attrs_);
+        attrs_.bInheritHandle = FALSE;
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                kIpcSecurityDescriptor,
+                SDDL_REVISION_1,
+                &descriptor_,
+                nullptr))
+        {
+            attrs_.lpSecurityDescriptor = descriptor_;
+        }
+        else
+        {
+            descriptor_ = nullptr;
+            attrs_.lpSecurityDescriptor = nullptr;
+        }
+    }
+
+    ~SecurityAttributesHolder()
+    {
+        if (descriptor_)
+        {
+            LocalFree(descriptor_);
+            descriptor_ = nullptr;
+        }
+    }
+
+    SECURITY_ATTRIBUTES* Get()
+    {
+        return descriptor_ ? &attrs_ : nullptr;
+    }
+
+private:
+    SECURITY_ATTRIBUTES attrs_{};
+    PSECURITY_DESCRIPTOR descriptor_ = nullptr;
+};
+
+SECURITY_ATTRIBUTES* GetIpcSecurityAttributes()
+{
+    static SecurityAttributesHolder holder;
+    return holder.Get();
+}
+
+RMSharedTelemetry* GetSharedTelemetry()
+{
+    static HANDLE s_map = nullptr;
+    static RMSharedTelemetry* s_view = nullptr;
+
+    if (s_view)
+    {
+        return s_view;
+    }
+
+    HANDLE map = CreateFileMappingW(
+        INVALID_HANDLE_VALUE,
+        GetIpcSecurityAttributes(),
+        PAGE_READWRITE,
+        0,
+        static_cast<DWORD>(sizeof(RMSharedTelemetry)),
+        kIpcMapName);
+    if (!map)
+    {
+        return nullptr;
+    }
+
+    bool created = (GetLastError() != ERROR_ALREADY_EXISTS);
+    void* view = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(RMSharedTelemetry));
+    if (!view)
+    {
+        CloseHandle(map);
+        return nullptr;
+    }
+
+    s_map = map;
+    s_view = static_cast<RMSharedTelemetry*>(view);
+
+    if (created)
+    {
+        ZeroMemory(s_view, sizeof(RMSharedTelemetry));
+        s_view->version = kIpcVersion;
+        s_view->size = sizeof(RMSharedTelemetry);
+    }
+
+    return s_view;
+}
+
+LONG AtomicRead(volatile LONG* value)
+{
+    return InterlockedCompareExchange(value, 0, 0);
+}
+
+} // namespace
+
+extern "C" int rm_ipc_publish(double temperatureC, double powerW, double usagePercent, int status)
+{
+    RMSharedTelemetry* shared = GetSharedTelemetry();
+    if (!shared)
+    {
+        return IPC_ERROR;
+    }
+
+    InterlockedIncrement(&shared->seq);
+    shared->version = kIpcVersion;
+    shared->size = sizeof(RMSharedTelemetry);
+    shared->status = static_cast<uint32_t>(status);
+    shared->timestamp_ms = GetTickCount64();
+    shared->temperature_c = temperatureC;
+    shared->power_w = powerW;
+    shared->usage_percent = usagePercent;
+    shared->writer_pid = GetCurrentProcessId();
+    InterlockedIncrement(&shared->seq);
+
+    return IPC_OK;
+}
+
+extern "C" int rm_ipc_read(
+    double* temperatureC,
+    double* powerW,
+    double* usagePercent,
+    int* status,
+    unsigned int max_age_ms)
+{
+    if (!temperatureC || !powerW || !usagePercent)
+    {
+        return IPC_ERROR;
+    }
+
+    RMSharedTelemetry* shared = GetSharedTelemetry();
+    if (!shared)
+    {
+        return IPC_NOT_READY;
+    }
+
+    if (shared->version != kIpcVersion || shared->size != sizeof(RMSharedTelemetry))
+    {
+        return IPC_NOT_READY;
+    }
+
+    RMSharedTelemetry snapshot{};
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        LONG seq1 = AtomicRead(&shared->seq);
+        if (seq1 & 1)
+        {
+            continue;
+        }
+
+        snapshot = *shared;
+        MemoryBarrier();
+        LONG seq2 = AtomicRead(&shared->seq);
+        if (seq1 == seq2 && !(seq2 & 1))
+        {
+            break;
+        }
+        if (attempt == 2)
+        {
+            return IPC_NOT_READY;
+        }
+    }
+
+    if (snapshot.timestamp_ms == 0)
+    {
+        return IPC_NOT_READY;
+    }
+
+    if (max_age_ms > 0)
+    {
+        ULONGLONG now = GetTickCount64();
+        if (now >= snapshot.timestamp_ms &&
+            now - snapshot.timestamp_ms > static_cast<ULONGLONG>(max_age_ms))
+        {
+            return IPC_STALE;
+        }
+    }
+
+    *temperatureC = snapshot.temperature_c;
+    *powerW = snapshot.power_w;
+    *usagePercent = snapshot.usage_percent;
+    if (status)
+    {
+        *status = static_cast<int>(snapshot.status);
+    }
+
+    return IPC_OK;
+}
+
+extern "C" int rm_ipc_service_start()
+{
+    if (g_ipc_service_event)
+    {
+        return 1;
+    }
+
+    g_ipc_service_event = CreateEventW(
+        GetIpcSecurityAttributes(),
+        TRUE,
+        TRUE,
+        kIpcServiceEventName);
+    if (!g_ipc_service_event)
+    {
+        return 0;
+    }
+    SetEvent(g_ipc_service_event);
+    return 1;
+}
+
+extern "C" void rm_ipc_service_stop()
+{
+    if (g_ipc_service_event)
+    {
+        CloseHandle(g_ipc_service_event);
+        g_ipc_service_event = nullptr;
+    }
+}
+
+extern "C" int rm_ipc_is_service_running()
+{
+    HANDLE event = OpenEventW(SYNCHRONIZE, FALSE, kIpcServiceEventName);
+    if (!event)
+    {
+        return 0;
+    }
+    CloseHandle(event);
+    return 1;
+}
+
+extern "C" int rm_ipc_owner_try_acquire()
+{
+    if (g_ipc_owner_held)
+    {
+        return 1;
+    }
+
+    HANDLE mutex = CreateMutexW(GetIpcSecurityAttributes(), FALSE, kIpcOwnerMutexName);
+    if (!mutex)
+    {
+        return 0;
+    }
+
+    DWORD wait = WaitForSingleObject(mutex, 0);
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED)
+    {
+        g_ipc_owner_mutex = mutex;
+        g_ipc_owner_held = true;
+        return 1;
+    }
+
+    CloseHandle(mutex);
+    return 0;
+}
+
+extern "C" void rm_ipc_owner_release()
+{
+    if (g_ipc_owner_mutex)
+    {
+        if (g_ipc_owner_held)
+        {
+            ReleaseMutex(g_ipc_owner_mutex);
+        }
+        CloseHandle(g_ipc_owner_mutex);
+        g_ipc_owner_mutex = nullptr;
+        g_ipc_owner_held = false;
+    }
 }
