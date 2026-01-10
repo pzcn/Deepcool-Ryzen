@@ -131,16 +131,13 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
     let repo_root = manifest_dir.join("..");
     let local_sdk_include = repo_root.join("third_party").join("amd_ryzen_master_sdk").join("include");
-    let sdk_include = if local_sdk_include.join("ICPUEx.h").exists() {
-        local_sdk_include
-    } else {
-        let sdk_path = env::var("AMDRMMONITORSDKPATH").unwrap_or_else(|_| {
-            panic!(
-                "AMD Ryzen Master SDK headers not found. Either vendor them into third_party/amd_ryzen_master_sdk/include or set AMDRMMONITORSDKPATH to the SDK root."
-            )
-        });
-        PathBuf::from(&sdk_path).join("include")
-    };
+    if !local_sdk_include.join("ICPUEx.h").exists() {
+        panic!(
+            "Local AMD Ryzen Master SDK headers not found at {}. Vendor them into third_party/amd_ryzen_master_sdk/include.",
+            local_sdk_include.display()
+        );
+    }
+    let sdk_include = local_sdk_include;
 
     let mut build = cc::Build::new();
     build
@@ -160,8 +157,8 @@ fn main() {
     }
 
     build
-        .file("../src/telemetry.cpp")
-        .file("../src/Utility.cpp")
+        .file(repo_root.join("src").join("telemetry.cpp"))
+        .file(repo_root.join("src").join("Utility.cpp"))
         .compile("ryzenmaster_wrapper");
 
     println!("cargo:rustc-link-lib=Netapi32");

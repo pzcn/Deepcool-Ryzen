@@ -3,6 +3,9 @@
 //
 //            Developed by: Advanced Micro Devices, Inc.
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <Shlobj.h>
 #include <intrin.h>
